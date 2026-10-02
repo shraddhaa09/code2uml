@@ -5,8 +5,8 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111.0-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.12-blue.svg?logo=python)](https://python.org)
 [![Mermaid.js](https://img.shields.io/badge/Mermaid.js-10.x-ff3670.svg)](https://mermaid.js.org/)
-[![Gemma AI](https://img.shields.io/badge/Gemma-2--9b--it-8e75ff.svg)](https://ai.google.dev/gemma)
-[![Tests](https://img.shields.io/badge/Tests-14%20Passed-brightgreen.svg)]()
+[![Gemma AI](https://img.shields.io/badge/Gemma-4--26b--a4b--it-8e75ff.svg)](https://ai.google.dev/gemma)
+[![Tests](https://img.shields.io/badge/Tests-21%20Passed-brightgreen.svg)]()
 
 ---
 
@@ -19,7 +19,8 @@ Understanding medium-to-large Spring Boot codebases is time-consuming and cognit
 **Code2UML AI** bridges deterministic static code analysis with private AI intelligence:
 1. **100% Local Code Parsing**: Analyzes Java files locally on the server using AST and deterministic token parsing.
 2. **Instant Mermaid Diagrams**: Automatically maps Controllers, Services, Repositories, Entities, and DTOs with constructor/field dependency flows, REST routes, and JPA entity management.
-3. **Privacy-Focused Gemma Architecture Assistant**: The AI never reads raw source code. Only high-level structured architectural metadata is provided to Gemma, preventing code leakage while enabling natural language architectural questions.
+3. **Dual View Toggle (`mermaid` vs `mermaid_full`)**: Seamlessly switch between a focused structural diagram with DTO relationships and a full diagram including all entity usages with live relationship counts.
+4. **Privacy-Focused Gemma Architecture Assistant**: The AI never reads raw source code. Only high-level structured architectural metadata is provided to Gemma, preventing code leakage while enabling natural language architectural questions.
 
 ---
 
@@ -30,6 +31,7 @@ Understanding medium-to-large Spring Boot codebases is time-consuming and cognit
 │                   BROWSER / CLIENT                     │
 │  - Drag & Drop ZIP Upload                              │
 │  - Interactive Pan/Zoom Mermaid.js Architecture Viewer │
+│  - Structural vs Full ('uses') Diagram Edge Toggle     │
 │  - REST Endpoints Catalog & Component Inspector        │
 │  - Gemma Architecture Q&A Chat                         │
 └───────────────────────────┬────────────────────────────┘
@@ -45,9 +47,10 @@ Understanding medium-to-large Spring Boot codebases is time-consuming and cognit
 │     - @Service / @Repository / @Entity / @Table        │
 │     - Constructor & Field Injection Detection          │
 │     - Endpoints (@GetMapping, @PostMapping, etc.)      │
-│     - Repository-to-Entity Mapping                     │
+│     - Repository-to-Entity Mapping & Deduplication     │
 │  4. Mermaid Architecture Generator (Subgraphs & Flow)  │
-│  5. Gemma AI Assistant (Google Gemini / OpenAI / Rule) │
+│  5. Gemma AI Assistant (Google v1 Interactions API /   │
+│     OpenAI-compatible / Deterministic Offline Engine) │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -66,9 +69,9 @@ Understanding medium-to-large Spring Boot codebases is time-consuming and cognit
 
 * **Backend**: Python 3.12, FastAPI, Uvicorn, Pydantic v2
 * **Analysis**: `javalang` AST + Deterministic Tokenizer Fallback (supports Java 8 through Java 21+)
-* **Diagramming**: Mermaid.js (flowchart TD with layer subgraphs and custom component styling)
+* **Diagramming**: Mermaid.js 10.x (flowchart TD with layer subgraphs, custom component styling, and safe HTML entity rendering)
 * **Frontend**: Vanilla JavaScript (ES6+), HTML5, Modern Dark CSS with responsive grid
-* **AI Provider**: Gemma (`gemma-2-9b-it` / `gemma-2-27b-it` via Google AI Studio or OpenAI-compatible local/cloud endpoints like Ollama, vLLM, Groq)
+* **AI Provider**: Google Gemma (`gemma-4-26b-a4b-it` via Google AI Studio / Google v1 Interactions API or OpenAI-compatible local/cloud endpoints like Ollama, vLLM, Groq)
 
 ---
 
@@ -82,6 +85,12 @@ Understanding medium-to-large Spring Boot codebases is time-consuming and cognit
 ```powershell
 cd c:\sem5\code2uml
 pip install -r backend\requirements.txt
+```
+
+For browser end-to-end testing with Playwright:
+```powershell
+pip install -r requirements-dev.txt
+python -m playwright install chromium
 ```
 
 ### 3. Configure Environment Variables (Optional)
@@ -113,11 +122,16 @@ Open your browser at **[http://localhost:8000](http://localhost:8000)**.
 
 ## 🧪 Running Tests
 
-Run the full automated test suite:
+Run the full test suite (21 unit, integration, and browser tests):
 ```powershell
-$env:PYTHONPATH="C:\sem5\code2uml"
-python -m pytest tests -v
+pytest -v
 ```
+
+Tests include:
+* **Golden Sample Fixture Analysis**: Asserts exact detection of 7 types (5 classes, 2 interfaces), 10 deduplicated relationships, 6 distinct packages, and 4 REST endpoints.
+* **Mermaid Generation**: Validates syntax, default vs full diagram strings, controller endpoint caps, and application subgraphs.
+* **Gemma Grounding**: Validates exact responses for database vendor queries, absent components, direct vs indirect dependencies, and privacy boundaries.
+* **Browser Automation (Playwright)**: End-to-end testing of sample project loading, 5 toggles without syntax error bombs, catalog formatting, chat Q&A, and error states (empty ZIP, corrupt ZIP, missing Java files).
 
 ---
 
@@ -127,30 +141,19 @@ python -m pytest tests -v
 |---|---|---|
 | `GET` | `/` | Serves the web application UI |
 | `GET` | `/api/health` | Backend status and AI configuration check |
-| `POST` | `/api/analyze` | Accepts multipart ZIP upload, returns architecture JSON and Mermaid string |
+| `POST` | `/api/analyze` | Accepts multipart ZIP upload, returns architecture JSON, default Mermaid string, and full Mermaid string |
 | `POST` | `/api/analyze/sample` | Instantly analyzes the included sample Spring Boot project |
 | `POST` | `/api/chat` | Receives `{ question, architecture }` and returns Gemma explanation |
 
 ---
 
-## 📦 Sample Project Architecture
+## 📦 Sample Golden Test Fixture
 
 Included in `sample-project/`:
-* `DemoApplication` (`@SpringBootApplication`)
-* `UserController` (`@RestController`, `@RequestMapping("/api/users")`, 4 endpoints)
-* `UserService` (Interface)
-* `UserServiceImpl` (`@Service`, injects `UserRepository`)
-* `UserRepository` (`@Repository`, `JpaRepository<User, Long>`)
-* `User` (`@Entity`, `@Table`)
-* `UserDTO` (Data Transfer Object)
-
----
-
-## 🔮 Limitations & Future Work
-
-* **Current Focus**: Tailored specifically for Java and Spring Boot ecosystems.
-* **Future Work**:
-  - Support for Maven multi-module monorepos (`pom.xml` aggregation).
-  - Microservices communication detection via `WebClient` / `@FeignClient`.
-  - Spring Cloud Gateway / Kafka topic producer & consumer architecture detection.
-  - Interactive diagram-to-code jumping via IDE extensions.
+* `DemoApplication` (`@SpringBootApplication`, role `application`)
+* `UserController` (`@RestController`, `@RequestMapping("/api/users")`, 4 endpoints: `GET /api/users`, `GET /api/users/{id}`, `POST /api/users`, `DELETE /api/users/{id}`)
+* `UserService` (`interface`, role `service_interface`, 4 declared methods)
+* `UserServiceImpl` (`@Service`, role `service`, implements `UserService`, injects `UserRepository`)
+* `UserRepository` (`interface`, role `repository`, extends `JpaRepository<User, Long>`, manages `User`, declared query method `findByEmail`)
+* `User` (`@Entity`, `@Table(name = "users")`, fields with `@Id`, `@GeneratedValue(strategy = GenerationType.IDENTITY)`)
+* `UserDTO` (role `dto`, fields `name`, `email`)

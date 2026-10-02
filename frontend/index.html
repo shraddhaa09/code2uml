@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code2UML AI — Spring Boot Architecture Visualizer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Mermaid.js -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="navbar">
+            <div class="brand">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-text">
+                    <h1>Code2UML <span>AI</span></h1>
+                    <p>Deterministic Spring Boot Architecture Visualizer & Gemma Explainer</p>
+                </div>
+            </div>
+            <div class="nav-badges">
+                <span class="badge badge-privacy" title="Raw source code stays local; only extracted architectural metadata is analyzed.">
+                    🛡️ Local Static Analysis
+                </span>
+                <span id="aiStatusBadge" class="badge badge-ai offline" title="Gemma AI configuration status">
+                    ⚡ Offline Rules Engine Active (Gemma API Key Optional)
+                </span>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- Upload & Action Bar -->
+            <section class="upload-section">
+                <div id="dropzone" class="dropzone">
+                    <div class="dropzone-icon">📁</div>
+                    <div class="dropzone-content">
+                        <h3>Drag & drop your Spring Boot <code>.zip</code> codebase here</h3>
+                        <p>Or click to browse from your computer (Max 50MB)</p>
+                        <input type="file" id="fileInput" accept=".zip" style="display: none;">
+                        <div class="button-group">
+                            <button id="browseBtn" class="btn btn-primary">Browse ZIP File</button>
+                            <button id="sampleBtn" class="btn btn-secondary">⚡ Try Sample Project</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="loadingOverlay" class="loading-overlay hidden">
+                    <div class="spinner"></div>
+                    <p id="loadingText">Extracting & analyzing Spring Boot architecture...</p>
+                </div>
+
+                <div id="errorMessage" class="error-banner hidden">
+                    <span class="error-icon">⚠️</span>
+                    <span id="errorText">An error occurred</span>
+                    <button id="closeErrorBtn" class="btn-close" title="Dismiss error">&times;</button>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section id="resultsSection" class="results-section hidden">
+                <!-- Architecture Stats Summary Strip -->
+                <div class="stats-grid">
+                    <div class="stat-card stat-total">
+                        <span class="stat-value" id="statTotalTypes">0</span>
+                        <span class="stat-label">Total Types</span>
+                        <span class="stat-sublabel" id="statTypesSubtitle">0 classes · 0 interfaces</span>
+                    </div>
+                    <div class="stat-card stat-controller">
+                        <span class="stat-value" id="statControllers">0</span>
+                        <span class="stat-label">Controllers</span>
+                    </div>
+                    <div class="stat-card stat-service">
+                        <span class="stat-value" id="statServices">0</span>
+                        <span class="stat-label">Services</span>
+                        <span class="stat-sublabel" id="statServicesSublabel"></span>
+                    </div>
+                    <div class="stat-card stat-repository">
+                        <span class="stat-value" id="statRepositories">0</span>
+                        <span class="stat-label">Repositories</span>
+                    </div>
+                    <div class="stat-card stat-entity">
+                        <span class="stat-value" id="statEntities">0</span>
+                        <span class="stat-label">Entities</span>
+                    </div>
+                    <div class="stat-card stat-dto">
+                        <span class="stat-value" id="statDTOs">0</span>
+                        <span class="stat-label">DTOs</span>
+                    </div>
+                    <div class="stat-card stat-application">
+                        <span class="stat-value" id="statApplications">0</span>
+                        <span class="stat-label">Application</span>
+                    </div>
+                    <div class="stat-card stat-endpoint">
+                        <span class="stat-value" id="statEndpoints">0</span>
+                        <span class="stat-label">REST Endpoints</span>
+                    </div>
+                    <div class="stat-card stat-relationship">
+                        <span class="stat-value" id="statRelationships">0</span>
+                        <span class="stat-label">Relationships</span>
+                    </div>
+                </div>
+
+                <!-- Architecture Observations Banner (Collapsible) -->
+                <div id="observationsSection" class="observations-banner hidden">
+                    <div class="observations-header" id="observationsHeader">
+                        <span class="observations-title">🔍 Architecture Observations</span>
+                        <button id="toggleObsBtn" class="btn-obs-toggle" type="button">Collapse</button>
+                    </div>
+                    <div id="observationsList" class="observations-content"></div>
+                </div>
+
+                <!-- Main Workspace: Diagram & Chat Split -->
+                <div class="workspace-grid">
+                    <!-- Left Column: Architecture Visualizer & Tabs -->
+                    <div class="visualizer-column">
+                        <div class="panel-header">
+                            <div class="tab-buttons">
+                                <button class="tab-btn active" data-tab="diagramTab">Architecture View</button>
+                                <button class="tab-btn" data-tab="umlTab">UML Class View</button>
+                                <button class="tab-btn" data-tab="endpointsTab">Endpoints (<span id="tabEndpointCount">0</span>)</button>
+                                <button class="tab-btn" data-tab="catalogTab">Component Catalog</button>
+                                <button class="tab-btn" data-tab="jsonTab">Raw JSON</button>
+                            </div>
+                            <div class="diagram-actions" id="diagramActions">
+                                <!-- Uses Edges Toggle (active in Architecture View) -->
+                                <label class="toggle-control" id="usesToggleWrapper" title="Toggle generic 'uses' edges (DTO and entity method usages)">
+                                    <input type="checkbox" id="toggleUsesEdges">
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Show 'uses' edges</span>
+                                </label>
+                                <button id="zoomInBtn" class="tool-btn" title="Zoom In">🔍+</button>
+                                <button id="zoomOutBtn" class="tool-btn" title="Zoom Out">🔍-</button>
+                                <button id="resetZoomBtn" class="tool-btn" title="Reset View">🔄 Reset</button>
+                                <button id="copyMermaidBtn" class="tool-btn" title="Copy Current Mermaid Code">📋 Copy Mermaid</button>
+                            </div>
+                        </div>
+
+                        <div class="tab-content-container">
+                            <!-- Tab 1: Architecture Diagram View -->
+                            <div id="diagramTab" class="tab-pane active">
+                                <div id="diagramViewport" class="diagram-viewport">
+                                    <div id="mermaidOutput" class="mermaid-container"></div>
+                                </div>
+                                <!-- Caption under diagram -->
+                                <div class="diagram-caption" id="diagramCaption"></div>
+                                <!-- Diagram Legend -->
+                                <div class="diagram-legend">
+                                    <span class="legend-title">Legend:</span>
+                                    <span class="legend-item"><span class="legend-line legend-injects">──►</span> Injects (constructor dependency)</span>
+                                    <span class="legend-item"><span class="legend-line legend-implements">- -►</span> Implements (UML realization)</span>
+                                    <span class="legend-item"><span class="legend-line legend-manages">══►</span> Depends (via JpaRepository&lt;T, ID&gt;)</span>
+                                    <span class="legend-item"><span class="legend-line legend-uses">···►</span> Uses (type in signatures/bodies)</span>
+                                </div>
+                            </div>
+
+                            <!-- Tab 2: UML Class Diagram View -->
+                            <div id="umlTab" class="tab-pane">
+                                <div id="umlViewport" class="diagram-viewport">
+                                    <div id="mermaidUmlOutput" class="mermaid-container"></div>
+                                </div>
+                                <div class="diagram-legend">
+                                    <span class="legend-title">UML Notation:</span>
+                                    <span class="legend-item"><span class="legend-line legend-implements">..|&gt;</span> Realization (implements)</span>
+                                    <span class="legend-item"><span class="legend-line legend-manages">──&gt;</span> Depends (via JpaRepository)</span>
+                                    <span class="legend-item"><span class="legend-line legend-injects">──&gt;</span> Uses (injected field)</span>
+                                    <span class="legend-item"><span class="legend-line legend-uses">..&gt;</span> Uses (parameter / return type)</span>
+                                </div>
+                            </div>
+
+                            <!-- Tab 2: Endpoints Directory -->
+                            <div id="endpointsTab" class="tab-pane">
+                                <div class="table-responsive">
+                                    <table class="endpoints-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Method</th>
+                                                <th>Path</th>
+                                                <th>Controller</th>
+                                                <th>Handler Method</th>
+                                                <th>Return Type</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="endpointsTableBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Tab 3: Component Catalog -->
+                            <div id="catalogTab" class="tab-pane">
+                                <div id="componentsList" class="components-list"></div>
+                            </div>
+
+                            <!-- Tab 4: Raw JSON -->
+                            <div id="jsonTab" class="tab-pane">
+                                <pre id="rawJsonOutput" class="code-block"></pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Gemma Architecture Assistant -->
+                    <div class="ai-column">
+                        <div class="ai-header">
+                            <div class="ai-header-title">
+                                <span class="ai-avatar">🤖</span>
+                                <div>
+                                    <h3>Architecture Assistant</h3>
+                                    <p>Answers strictly grounded in deterministic static analysis</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Chat Messages Container -->
+                        <div id="chatMessages" class="chat-messages">
+                            <div class="chat-bubble bot-bubble">
+                                <div class="bubble-header" id="welcomeBubbleHeader">Architecture Assistant</div>
+                                <div class="bubble-content">
+                                    Hello! I'm ready to explain the architecture of <b id="chatProjectName">your project</b>.
+                                    Try clicking one of the suggested prompts below or ask your own question!
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Suggestions -->
+                        <div class="suggestions-container">
+                            <span class="suggestion-chip" data-prompt="Explain the overall request flow from controller to database.">🔄 Request flow</span>
+                            <span class="suggestion-chip" data-prompt="Does UserController directly depend on UserRepository?">❓ Does UserController depend on UserRepository?</span>
+                            <span class="suggestion-chip" data-prompt="List all REST endpoints, HTTP methods, and their controllers.">🌐 Endpoints</span>
+                            <span class="suggestion-chip" data-prompt="Which database vendor is used?">🏢 Which database vendor is used?</span>
+                            <span class="suggestion-chip" data-prompt="Is there an authentication component?">🔒 Is there an authentication component?</span>
+                            <span class="suggestion-chip" data-prompt="What database entities and repositories are present?">🗄️ Entities & Repos</span>
+                        </div>
+
+                        <!-- Chat Input Form -->
+                        <form id="chatForm" class="chat-input-form">
+                            <input type="text" id="chatInput" placeholder="Ask about controllers, dependencies, flow, endpoints..." autocomplete="off">
+                            <button type="submit" id="sendBtn" class="btn btn-primary">Send</button>
+                        </form>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>Code2UML AI &bull; Autonomous Spring Boot Static Architecture & Gemma Intelligence &bull; Privacy First</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
