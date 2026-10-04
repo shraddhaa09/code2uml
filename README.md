@@ -157,3 +157,4 @@ Included in `sample-project/`:
 * `UserRepository` (`interface`, role `repository`, extends `JpaRepository<User, Long>`, manages `User`, declared query method `findByEmail`)
 * `User` (`@Entity`, `@Table(name = "users")`, fields with `@Id`, `@GeneratedValue(strategy = GenerationType.IDENTITY)`)
 * `UserDTO` (role `dto`, fields `name`, `email`)
+* 
