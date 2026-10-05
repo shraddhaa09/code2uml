@@ -315,6 +315,73 @@ body {
     color: #f1f5f9;
 }
 
+/* Diagnostics & Analysis Coverage Banner */
+.diagnostics-banner {
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid var(--border-color);
+    border-left: 4px solid var(--accent-blue);
+    border-radius: var(--radius-md);
+    padding: 0.85rem 1.25rem;
+    margin-bottom: 1.25rem;
+    transition: all 0.2s ease;
+}
+
+.diagnostics-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+}
+
+.diagnostics-title {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.badge-coverage {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.15rem 0.5rem;
+    border-radius: 9999px;
+    background: rgba(74, 222, 128, 0.15);
+    color: var(--accent-green);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+}
+
+.badge-coverage.partial {
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--accent-orange);
+    border-color: rgba(251, 191, 36, 0.3);
+}
+
+.btn-diag-toggle {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.btn-diag-toggle:hover {
+    color: var(--text-main);
+}
+
+.diagnostics-content {
+    margin-top: 0.75rem;
+    font-size: 0.82rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    color: var(--text-muted);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 0.6rem;
+}
+
 /* Stats Grid - 9 Responsive Cards */
 .stats-grid {
     display: grid;
@@ -986,6 +1053,38 @@ body {
     text-align: center;
     font-size: 0.8rem;
     color: var(--text-muted);
+}
+
+/* Tool Select for Focus Mode */
+.tool-select {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    padding: 0.35rem 0.65rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    outline: none;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.tool-select:hover, .tool-select:focus {
+    border-color: var(--accent-blue);
+}
+
+.hosted-warning-banner {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid var(--accent-orange);
+    color: #fde68a;
+    padding: 0.5rem 1rem;
+    font-size: 0.82rem;
+    text-align: center;
+}
+
+.tag-heuristic {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-orange);
+    border: 1px dashed rgba(245, 158, 11, 0.4);
 }
 
 .hidden {

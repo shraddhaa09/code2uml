@@ -50,6 +50,7 @@ class ClassInfo(BaseModel):
     base_path: Optional[str] = None
     table_name: Optional[str] = None
     managed_entity: Optional[str] = None
+    detection_heuristic: Optional[str] = None
 
 
 class RelationshipInfo(BaseModel):
@@ -82,9 +83,30 @@ class Observation(BaseModel):
     components: List[str] = Field(default_factory=list)
 
 
+class FileParseDiagnostic(BaseModel):
+    file: str
+    method: str  # "ast", "fallback", "failed", "unsupported", "skipped"
+    types_count: int = 0
+    error: Optional[str] = None
+
+
+class AnalysisDiagnostics(BaseModel):
+    total_files_discovered: int = 0
+    parsed_ast_count: int = 0
+    parsed_fallback_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    unsupported_languages: Dict[str, int] = Field(default_factory=dict)
+    coverage_percentage: float = 100.0
+    warnings: List[str] = Field(default_factory=list)
+    file_details: List[FileParseDiagnostic] = Field(default_factory=list)
+
+
 class Architecture(BaseModel):
+    analysis_id: Optional[str] = None
     project: str
     summary: ArchitectureSummary
+    diagnostics: AnalysisDiagnostics = Field(default_factory=AnalysisDiagnostics)
     classes: List[ClassInfo] = Field(default_factory=list)
     controllers: List[ClassInfo] = Field(default_factory=list)
     services: List[ClassInfo] = Field(default_factory=list)
@@ -97,4 +119,7 @@ class Architecture(BaseModel):
     endpoints: List[EndpointInfo] = Field(default_factory=list)
     packages: List[str] = Field(default_factory=list)
     observations: List[Observation] = Field(default_factory=list)
+    auth_info: Dict[str, Any] = Field(default_factory=dict)
+    database_info: Dict[str, Any] = Field(default_factory=dict)
+
 

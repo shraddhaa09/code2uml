@@ -1,7 +1,8 @@
 import os
 import json
+import re
 import httpx
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,18 +15,37 @@ Key Rules:
 2. Distinguish direct vs indirect dependencies: Only state that A directly depends on B if A directly injects or references B. (e.g., If Controller injects Service, and Service injects Repository, Controller does NOT directly depend on Repository).
 3. If asked about components, frameworks, authentication, payment services, or database vendors not present in the context, explicitly state: "Not found in the analyzed architecture / cannot be determined from the code."
 4. If asked about runtime method-body behavior, error handling logic, or database query results (e.g., what happens when an ID is not found), explicitly state that internal runtime method-body behavior cannot be determined from the extracted static architecture metadata.
-5. Keep your explanations precise, structured, and helpful for software engineers."""
+5. If any class is not found in the extracted architecture, explicitly state that it does not exist in the analyzed files.
+6. Keep your explanations precise, structured, and helpful for software engineers."""
 
 DEFAULT_GEMMA_MODEL = "gemma-4-26b-a4b-it"
 INTERACTIONS_API_URL = "https://generativelanguage.googleapis.com/v1/interactions"
 
 
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Computes basic Levenshtein distance between two strings."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
 class GemmaArchitect:
     """
     Handles architectural question-answering using Gemma open models.
-    Uses Google's current official v1 Interactions API as the primary interface,
+    Uses Google's official v1 Interactions API as the primary interface,
     with generateContent compatibility fallback, OpenAI-compatible endpoint support,
-    and a local deterministic offline rules engine.
+    and an explicit deterministic intent routing rules engine.
     """
 
     def __init__(self):
@@ -38,7 +58,21 @@ class GemmaArchitect:
             or os.getenv("GOOGLE_API_KEY")
             or ""
         ).strip()
-        self.api_url = os.getenv("GEMMA_API_URL", "").strip()
+        raw_url = (
+            os.getenv("GEMMA_API_URL")
+            or os.getenv("OLLAMA_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or ""
+        ).strip()
+        
+        # Normalize local Ollama / OpenAI-compatible endpoint URL
+        if raw_url:
+            raw_url = raw_url.rstrip("/")
+            if raw_url.endswith(":11434"):
+                raw_url += "/v1/chat/completions"
+            elif raw_url.endswith("/v1"):
+                raw_url += "/chat/completions"
+        self.api_url = raw_url
         self.model_name = os.getenv("GEMMA_MODEL", DEFAULT_GEMMA_MODEL).strip() or DEFAULT_GEMMA_MODEL
 
     def is_configured(self) -> bool:
@@ -71,44 +105,87 @@ class GemmaArchitect:
         }
 
     async def ask(self, question: str, architecture_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Send question and structured architecture context to Gemma model."""
+        """Send question and structured architecture context to Gemma model with deterministic fallback & post-check."""
         self._refresh_config()
-        # Sanitize / summarize architecture data to send only relevant architectural metadata
         context_summary = self._prepare_context(architecture_data)
 
         # If no key or URL is configured, use the deterministic rule-based architect assistant
         if not self.is_configured():
             return {
                 "answer": self._deterministic_answer(question, architecture_data),
-                "model": "deterministic-rules-engine (Offline Fallback)",
-                "note": "To enable live Gemma LLM inference, configure GEMINI_API_KEY / GEMMA_API_KEY in your .env file."
+                "model": "Deterministic engine",
+                "note": "To enable live Gemma LLM inference, configure GEMINI_API_KEY in your .env file."
             }
 
         try:
             # 1. Custom or OpenAI-compatible URL (e.g. Ollama, OpenRouter, Groq, vLLM)
             if self.api_url:
-                return await self._call_openai_compatible_api(question, context_summary)
+                res = await self._call_openai_compatible_api(question, context_summary)
+            else:
+                # 2. Google AI Studio (Official v1 Interactions API with generateContent fallback)
+                res = await self._call_google_interactions_api(question, context_summary)
 
-            # 2. Google AI Studio (Official v1 Interactions API with generateContent fallback)
-            return await self._call_google_interactions_api(question, context_summary)
+            # Post-check validation: check if answer mentions classes not in architecture
+            answer_text = res.get("answer", "")
+            verified_answer = self._validate_and_post_check_answer(answer_text, architecture_data)
+            res["answer"] = verified_answer
+            res["model"] = f"Gemma ({self.model_name})"
+            return res
 
         except Exception as e:
             # Graceful error handling - never crash the app or architecture viewer
             return {
-                "answer": (
-                    f"⚠️ Gemma AI provider request failed: {str(e)}\n\n"
-                    f"**Deterministic Architectural Analysis Summary for your query:**\n\n"
-                    + self._deterministic_answer(question, architecture_data)
-                ),
-                "model": "error-fallback",
+                "answer": self._deterministic_answer(question, architecture_data),
+                "model": "Deterministic engine",
                 "error": str(e)
             }
 
+    def _validate_and_post_check_answer(self, answer: str, arch: Dict[str, Any]) -> str:
+        """Post-check model output: any class name in the answer that does not exist gets an inline warning."""
+        all_class_names = {c.get("name") for c in arch.get("classes", []) if c.get("name")}
+        
+        # Ignored standard language keywords & types
+        ignored = {
+            "String", "Long", "Integer", "Double", "Boolean", "List", "Set", "Map", "Optional",
+            "Void", "Object", "Class", "Spring", "SpringBoot", "Controller", "Service", "Repository",
+            "Entity", "DTO", "Java", "PostgreSQL", "MySQL", "H2", "Oracle", "MongoDB", "MariaDB",
+            "REST", "HTTP", "JSON", "GET", "POST", "PUT", "DELETE", "PATCH", "JPA", "Hibernate",
+            "Architecture", "Assistant", "Gemma", "Code2UML", "Table", "Id", "RequestMapping"
+        }
+
+        # Find potential class names (PascalCase words with length >= 4)
+        tokens = set(re.findall(r'\b[A-Z][a-zA-Z0-9_]{3,}\b', answer))
+        hallucinations = []
+
+        for token in tokens:
+            if token in ignored or token in all_class_names:
+                continue
+            # Check if token is a plural or suffix variation
+            if token.endswith("s") and token[:-1] in all_class_names:
+                continue
+            if token.endswith("es") and token[:-2] in all_class_names:
+                continue
+            # If it ends with Controller, Service, Repository, Entity, DTO, Request, Response but not present:
+            if any(token.endswith(suffix) for suffix in ["Controller", "Service", "ServiceImpl", "Repository", "Entity", "DTO", "Request", "Response", "Filter", "Config"]):
+                hallucinations.append(token)
+
+        if hallucinations:
+            warnings_str = ", ".join([f"`{h}`" for h in sorted(list(set(hallucinations)))])
+            return answer + f"\n\n> ⚠️ **Verification Note**: Class(es) {warnings_str} mentioned in this response were not found in the extracted project architecture."
+        return answer
+
     def _prepare_context(self, arch: Dict[str, Any]) -> str:
         """Create a clean, privacy-conscious textual representation of the architecture metadata."""
+        diag = arch.get("diagnostics", {})
+        db_info = arch.get("database_info", {})
+        auth_info = arch.get("auth_info", {})
+
         lines = [
             f"Project: {arch.get('project', 'Spring Boot Project')}",
             f"Summary: {json.dumps(arch.get('summary', {}), indent=2)}",
+            f"Diagnostics: Total files={diag.get('total_files_discovered', 0)}, AST parsed={diag.get('parsed_ast_count', 0)}, Fallback parsed={diag.get('parsed_fallback_count', 0)}, Failed={diag.get('failed_count', 0)}, Coverage={diag.get('coverage_percentage', 100.0)}%",
+            f"Database Detected: {db_info.get('vendor', 'Unknown')} (Evidence: {', '.join(db_info.get('evidence', [])) or 'None'})",
+            f"Authentication Detected: {auth_info.get('detected', False)} (Components: {', '.join(auth_info.get('components', [])) or 'None'})",
             f"Packages: {', '.join(arch.get('packages', [])) or 'None'}",
             "\nControllers & Endpoints:"
         ]
@@ -151,9 +228,7 @@ class GemmaArchitect:
         return "\n".join(lines)
 
     async def _call_openai_compatible_api(self, question: str, context: str) -> Dict[str, Any]:
-        headers = {
-            "Content-Type": "application/json"
-        }
+        headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -171,11 +246,7 @@ class GemmaArchitect:
             resp.raise_for_status()
             data = resp.json()
             answer = data["choices"][0]["message"]["content"]
-            return {
-                "answer": answer,
-                "model": self.model_name,
-                "api": "OpenAI-Compatible"
-            }
+            return {"answer": answer, "model": self.model_name, "api": "OpenAI-Compatible"}
 
     async def _call_google_interactions_api(self, question: str, context: str) -> Dict[str, Any]:
         req_spec = self.build_interactions_request(question, {"controllers": [], "services": [], "repositories": [], "entities": [], "relationships": [], "endpoints": []})
@@ -194,42 +265,22 @@ class GemmaArchitect:
                         interaction_obj = data["interaction"]
                         if isinstance(interaction_obj, dict):
                             if "message" in interaction_obj and "content" in interaction_obj["message"]:
-                                return {
-                                    "answer": interaction_obj["message"]["content"],
-                                    "model": self.model_name,
-                                    "api": "Google v1 Interactions API"
-                                }
+                                return {"answer": interaction_obj["message"]["content"], "model": self.model_name, "api": "Google v1 Interactions API"}
                             if "content" in interaction_obj:
-                                return {
-                                    "answer": interaction_obj["content"],
-                                    "model": self.model_name,
-                                    "api": "Google v1 Interactions API"
-                                }
+                                return {"answer": interaction_obj["content"], "model": self.model_name, "api": "Google v1 Interactions API"}
                     if "candidates" in data and data["candidates"]:
                         parts = data["candidates"][0].get("content", {}).get("parts", [])
                         if parts:
-                            return {
-                                "answer": parts[0].get("text", ""),
-                                "model": self.model_name,
-                                "api": "Google v1 Interactions API"
-                            }
+                            return {"answer": parts[0].get("text", ""), "model": self.model_name, "api": "Google v1 Interactions API"}
                     if "text" in data:
-                        return {
-                            "answer": data["text"],
-                            "model": self.model_name,
-                            "api": "Google v1 Interactions API"
-                        }
+                        return {"answer": data["text"], "model": self.model_name, "api": "Google v1 Interactions API"}
             except Exception:
                 pass
 
             # Fallback: generateContent endpoint (v1)
             clean_model = self.model_name.replace("models/", "")
             generate_url = f"https://generativelanguage.googleapis.com/v1/models/{clean_model}:generateContent?key={self.api_key}"
-            prompt = (
-                f"{SYSTEM_PROMPT}\n\n"
-                f"=== ARCHITECTURE CONTEXT ===\n{context}\n\n"
-                f"=== USER QUESTION ===\n{question}"
-            )
+            prompt = f"{SYSTEM_PROMPT}\n\n=== ARCHITECTURE CONTEXT ===\n{context}\n\n=== USER QUESTION ===\n{question}"
             generate_payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
@@ -245,20 +296,15 @@ class GemmaArchitect:
             if candidates and "content" in candidates[0]:
                 parts = candidates[0]["content"].get("parts", [])
                 if parts:
-                    return {
-                        "answer": parts[0].get("text", "No response generated."),
-                        "model": self.model_name,
-                        "api": "Google Generative Language API"
-                    }
+                    return {"answer": parts[0].get("text", "No response generated."), "model": self.model_name, "api": "Google Generative Language API"}
 
-            return {
-                "answer": "Received empty response from Gemma model.",
-                "model": self.model_name,
-                "api": "Google Generative Language API"
-            }
+            return {"answer": "Received empty response from Gemma model.", "model": self.model_name, "api": "Google Generative Language API"}
 
     def _deterministic_answer(self, question: str, arch: Dict[str, Any]) -> str:
-        """Rule-based architecture responder providing accurate context even without live LLM key."""
+        """
+        Explicit Intent Routing Engine.
+        Answers all questions deterministically using strictly the extracted architecture metadata.
+        """
         q = question.lower().strip()
         summary = arch.get("summary", {})
         classes = arch.get("classes", [])
@@ -269,56 +315,445 @@ class GemmaArchitect:
         entities = arch.get("entities", [])
         dtos = arch.get("dtos", [])
         endpoints = arch.get("endpoints", [])
-        if not endpoints:
-            for c in controllers:
-                endpoints.extend(c.get("endpoints", []))
-        # Check database vendor query
-        db_vendor_keywords = ["database vendor", "which database", "what database", "db vendor", "mysql", "postgres", "postgresql", "oracle", "mariadb", "mongodb", "h2", "sql server"]
-        if any(kw in q for kw in db_vendor_keywords):
-            return "The extracted architecture does not provide enough information to determine the database vendor."
+        relationships = arch.get("relationships", [])
+        db_info = arch.get("database_info", {})
+        auth_info = arch.get("auth_info", {})
 
-        # Check absent components / non-existent services
-        absent_component_keywords = [
-            "authentication", "jwt", "oauth", "security", "login", "password",
-            "payment", "stripe", "paypal", "billing", "checkout",
-            "kafka", "rabbitmq", "activemq", "message queue", "messaging",
-            "redis", "memcached", "cache", "caching",
-            "graphql", "websocket", "mail", "email"
-        ]
-        if any(kw in q for kw in absent_component_keywords):
-            # Verify if any class or package in the architecture matches
-            all_names = " ".join([c.get("name", "").lower() for c in classes] + arch.get("packages", []))
-            if not any(kw in all_names for kw in absent_component_keywords if kw in q):
-                return "No such component was detected in the analyzed architecture."
+        if not classes:
+            classes = list(controllers) + list(services) + list(service_interfaces) + list(repositories) + list(entities) + list(dtos)
 
-        # Check direct dependency question between UserController and UserRepository
-        if "usercontroller" in q and "userrepository" in q and ("depend" in q or "direct" in q or "inject" in q):
+        class_name_map = {c["name"].lower(): c["name"] for c in classes if "name" in c}
+        all_class_names = [c["name"] for c in classes if "name" in c]
+
+        def resolve_class_name(query_term: str) -> Tuple[Optional[str], Optional[str]]:
+            """Resolves a class name using exact match, case-insensitive, or closest fuzzy match."""
+            clean = query_term.strip("`'\" ,.?")
+            clean_lower = clean.lower()
+            if clean_lower in class_name_map:
+                return class_name_map[clean_lower], None
+            
+            # Fuzzy match
+            candidates = []
+            for name in all_class_names:
+                dist = levenshtein_distance(clean_lower, name.lower())
+                if dist <= 3 or clean_lower in name.lower() or name.lower() in clean_lower:
+                    candidates.append((dist, name))
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                return None, candidates[0][1]
+            return None, None
+
+        ignored_query_tokens = {
+            "what", "which", "where", "when", "why", "how", "does", "do", "did", "is", "are", "was", "were",
+            "can", "could", "should", "would", "list", "show", "explain", "tell", "who", "give", "find",
+            "describe", "check", "get", "post", "put", "delete", "patch", "options", "head", "the", "this",
+            "that", "these", "those", "all", "any", "some", "every", "no", "not", "yes", "java", "spring",
+            "boot", "framework", "project", "database", "vendor", "authentication", "security", "entities",
+            "entity", "repositories", "repository", "services", "service", "controllers", "controller",
+            "endpoints", "endpoint", "packages", "package", "types", "type", "classes", "class",
+            "interfaces", "interface", "methods", "method", "fields", "field", "models", "model",
+            "components", "component", "filters", "filter", "handlers", "handler", "application", "app",
+            "flow", "call", "calls", "hierarchy", "code", "file", "files", "overall", "datasource",
+            "api", "rest", "http", "json", "sql", "jwt", "id", "url", "uri", "jpa", "dto", "dtos", "crud", "rdbms", "db"
+        }
+
+        # ----------------------------------------------------------------------
+        # Fast-path Intent: Runtime / Internal Method-Body Query
+        # ----------------------------------------------------------------------
+        runtime_keywords = ["what happens when", "finds no user", "if user not found", "runtime exception", "method body", "execution", "internal logic", "finds no"]
+        if any(kw in q for kw in runtime_keywords):
+            return "This internal runtime method-body behavior cannot be determined from the extracted static architecture metadata.\n\n*Based on analyzed files.*"
+
+        # Extract referenced classes in question
+        extracted_classes_in_query: List[str] = []
+        missing_classes_in_query: List[Tuple[str, Optional[str]]] = []
+
+        # Find candidate PascalCase tokens in question
+        words = re.findall(r'\b[A-Za-z0-9_]+\b', question)
+        for w in words:
+            if len(w) >= 3 and w.lower() not in ignored_query_tokens:
+                exact, closest = resolve_class_name(w)
+                if exact and exact not in extracted_classes_in_query:
+                    extracted_classes_in_query.append(exact)
+                elif not exact and closest and (w[0].isupper() or any(w.lower().endswith(s) for s in ["service", "controller", "repository", "entity", "dto", "repo", "impl", "gateway"])):
+                    missing_classes_in_query.append((w, closest))
+                elif not exact and any(w.lower().endswith(s) for s in ["controller", "service", "repository", "entity", "dto", "repo", "impl", "gateway"]):
+                    missing_classes_in_query.append((w, None))
+
+        # If question is asking about an absent feature or component
+        if "payment" in q and not any("payment" in c.lower() for c in all_class_names):
+            return "No such component was detected in the analyzed architecture.\n\n*Based on analyzed files.*"
+
+        # Check for non-existent class error
+        if missing_classes_in_query and not extracted_classes_in_query:
+            missing_tokens = []
+            for m_name, sug in missing_classes_in_query:
+                if sug:
+                    missing_tokens.append(f"Class `{m_name}` was not found in the analyzed architecture. Did you mean `{sug}`?")
+                else:
+                    missing_tokens.append(f"Class `{m_name}` was not found in the analyzed architecture.")
+            return "\n\n".join(missing_tokens) + "\n\n*Based on analyzed files.*"
+
+        # ----------------------------------------------------------------------
+        # Intent 1: Greeting
+        # ----------------------------------------------------------------------
+        greeting_words = ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening"]
+        if q in greeting_words or any(q.startswith(g) for g in ["hello", "hi ", "hey "]):
             return (
-                "No. `UserController` does not directly depend on `UserRepository`.\n\n"
-                "- `UserController` directly depends on `UserService` (interface) via constructor injection.\n"
-                "- `UserService` is implemented by `UserServiceImpl`, which directly depends on `UserRepository`."
+                f"Hello! I'm your Spring Boot architecture assistant for **{arch.get('project', 'your project')}**.\n\n"
+                f"You can ask me about request flows, dependency chains, endpoints, database configuration, authentication, or specific component interactions.\n\n"
+                f"*Based on analyzed files: {summary.get('total_types', len(classes))} types across {summary.get('packages', len(arch.get('packages', [])))} packages.*"
             )
 
-        # Check generic direct dependency question between X and Y
-        for c in classes:
-            cname = c.get("name", "")
-            if cname.lower() in q and ("direct" in q or "depend" in q):
-                for other in classes:
-                    oname = other.get("name", "")
-                    if oname != cname and oname.lower() in q:
-                        is_direct = oname in c.get("dependencies", [])
-                        if is_direct:
-                            return f"Yes. `{cname}` directly depends on `{oname}`."
-                        else:
-                            deps_str = ", ".join([f"`{d}`" for d in c.get("dependencies", [])]) or "none"
-                            return f"No. `{cname}` does not directly depend on `{oname}`. Its direct dependencies are: {deps_str}."
+        # ----------------------------------------------------------------------
+        # Intent 2: Help
+        # ----------------------------------------------------------------------
+        if q in ["help", "what can you do", "help me", "commands", "how to use"]:
+            sample_ctrl = controllers[0].get("name", "UserController") if controllers else "Controller"
+            sample_srv = services[0].get("name", "UserService") if services else "Service"
+            sample_repo = repositories[0].get("name", "UserRepository") if repositories else "Repository"
+            return (
+                f"### 💡 How to explore the architecture of **{arch.get('project', 'your project')}**:\n\n"
+                f"You can ask natural questions like:\n"
+                f"1. **Request Flow**: `Explain the request flow for {sample_ctrl}`\n"
+                f"2. **Dependency Check**: `Does {sample_ctrl} depend on {sample_repo}?`\n"
+                f"3. **Endpoints Catalog**: `List all REST endpoints in {sample_ctrl}`\n"
+                f"4. **Database & Auth**: `Which database vendor is used?` or `Is there an authentication component?`\n"
+                f"5. **Implementers**: `Who implements {sample_srv}?`\n"
+                f"6. **Entities & Repositories**: `What database entities and repositories are present?`\n\n"
+                f"*Based on analyzed files.*"
+            )
 
-        # Check runtime / method body behavior queries
+        # ----------------------------------------------------------------------
+        # Intent 3: Entities & Repositories list
+        # (Must take precedence before generic database vendor check!)
+        # ----------------------------------------------------------------------
+        if ("entit" in q and "repositor" in q) or ("database entities" in q) or ("entities and repositories" in q):
+            lines = [f"### 📦 Database Entities & Repositories ({len(entities)} Entities, {len(repositories)} Repositories):\n"]
+            evidence_files = []
+            
+            lines.append("#### 📦 Domain Entities:")
+            if entities:
+                for e in entities:
+                    evidence_files.append(e.get("file", f"{e.get('name')}.java"))
+                    fields = ", ".join([f"{f.get('name')}: {f.get('type')}{' (@Id)' if f.get('is_id') else ''}" for f in e.get("fields", [])])
+                    lines.append(f"- **{e.get('name')}** (Table: `{e.get('table_name', 'default')}`) | Fields: {fields or 'None'}")
+            else:
+                lines.append("- *No domain entities detected.*")
+
+            lines.append("\n#### 🗄️ Repositories:")
+            if repositories:
+                for r in repositories:
+                    evidence_files.append(r.get("file", f"{r.get('name')}.java"))
+                    managed = r.get("managed_entity") or "Entity"
+                    lines.append(f"- **{r.get('name')}** (Extends: `{r.get('extends', 'JpaRepository')}`, Manages: `{managed}`)")
+            else:
+                lines.append("- *No repositories detected.*")
+
+            ev_str = ", ".join(list(dict.fromkeys(evidence_files))[:6])
+            lines.append(f"\n*Based on analyzed files: {ev_str}.*")
+            return "\n".join(lines)
+
+        # ----------------------------------------------------------------------
+        # Intent 4: Database Vendor & Driver Detection
+        # ----------------------------------------------------------------------
+        db_keywords = ["database vendor", "which database", "what database", "db vendor", "datasource", "rdbms", "database is used", "database used"]
+        if any(kw in q for kw in db_keywords):
+            if db_info and db_info.get("detected") and db_info.get("vendor"):
+                evidence_list = db_info.get("evidence", [])
+                ev_str = "\n".join([f"- {e}" for e in evidence_list]) if evidence_list else "- Configuration found in build and properties files."
+                return (
+                    f"### 🗄️ Database Configuration:\n\n"
+                    f"The detected database vendor is **{db_info.get('vendor')}**.\n\n"
+                    f"**Evidence from analyzed files:**\n{ev_str}\n\n"
+                    f"*Based on analyzed files: pom.xml / application configuration.*"
+                )
+            else:
+                return (
+                    "The database vendor is not determinable from the analyzed files.\n\n"
+                    "(No database driver dependency or JDBC URL found in pom.xml, build.gradle, or application.properties/yml).\n\n"
+                    "*Based on analyzed files.*"
+                )
+
+        # ----------------------------------------------------------------------
+        # Intent 5: Authentication & Security Detection
+        # ----------------------------------------------------------------------
+        auth_keywords = ["authentication", "auth component", "security component", "jwt", "oauth", "login", "security filter", "userdetailsservice", "is there an auth"]
+        if any(kw in q for kw in auth_keywords) and not ("endpoint" in q or "route" in q):
+            if auth_info and auth_info.get("detected"):
+                lines = ["### 🔒 Authentication & Security Components Detected:\n"]
+                if auth_info.get("components"):
+                    lines.append(f"- **Security Classes / Filters**: {', '.join([f'`{c}`' for c in auth_info.get('components', [])])}")
+                if auth_info.get("dependencies"):
+                    lines.append(f"- **Security Libraries**: {', '.join([f'`{d}`' for d in auth_info.get('dependencies', [])])}")
+                if auth_info.get("evidence"):
+                    lines.append("\n**Evidence from analyzed files:**")
+                    for ev in auth_info.get("evidence", []):
+                        lines.append(f"- {ev}")
+                lines.append("\n*Based on analyzed files.*")
+                return "\n".join(lines)
+            else:
+                return (
+                    "No authentication component detected in the analyzed files.\n\n"
+                    "(Note: this only covers the analyzed files in the uploaded archive).\n\n"
+                    "*Based on analyzed files.*"
+                )
+
+        # ----------------------------------------------------------------------
+        # Intent 6: Implementers of an Interface
+        # ----------------------------------------------------------------------
+        if "who implements" in q or "implementations of" in q or "implementers of" in q or ("implements" in q and len(extracted_classes_in_query) == 1):
+            target_iface = extracted_classes_in_query[0] if extracted_classes_in_query else None
+            if not target_iface:
+                # Find interface in question
+                for si in service_interfaces + [c for c in classes if c.get("is_interface")]:
+                    if si.get("name", "").lower() in q:
+                        target_iface = si.get("name")
+                        break
+
+            if target_iface:
+                implementers = []
+                evidence_files = []
+                for c in classes:
+                    for imp in c.get("implements", []):
+                        if target_iface in imp or imp in target_iface:
+                            implementers.append(c)
+                            evidence_files.append(c.get("file"))
+                            break
+
+                if implementers:
+                    lines = [f"### ⚙️ Implementers of `{target_iface}` ({len(implementers)} found):\n"]
+                    for impl in implementers:
+                        stereo = f" (@{impl.get('type')})" if impl.get('type') else ""
+                        lines.append(f"- **`{impl.get('name')}`**{stereo} in file `{impl.get('file')}`")
+                    ev_str = ", ".join(evidence_files)
+                    lines.append(f"\n*Based on analyzed files: {ev_str}.*")
+                    return "\n".join(lines)
+                else:
+                    return f"No direct implementing classes for `{target_iface}` were detected in the analyzed codebase.\n\n*Based on analyzed files.*"
+
+        # ----------------------------------------------------------------------
+        # Intent 7: Who Depends On X (Reverse Dependencies)
+        # ----------------------------------------------------------------------
+        if "who depends on" in q or "who calls" in q or "who uses" in q or "dependents of" in q:
+            target = extracted_classes_in_query[0] if extracted_classes_in_query else None
+            if not target:
+                for c in classes:
+                    if c.get("name", "").lower() in q:
+                        target = c.get("name")
+                        break
+            if target:
+                dependents = []
+                evidence_files = []
+                for rel in relationships:
+                    if rel.get("target") == target:
+                        src_name = rel.get("source")
+                        src_obj = next((c for c in classes if c.get("name") == src_name), None)
+                        dependents.append((src_name, rel.get("type"), rel.get("description", "")))
+                        if src_obj and src_obj.get("file"):
+                            evidence_files.append(src_obj.get("file"))
+
+                if dependents:
+                    lines = [f"### 🔗 Components that depend on `{target}` ({len(dependents)} found):\n"]
+                    for src, r_type, r_desc in dependents:
+                        lines.append(f"- **`{src}`** (relationship: `{r_type}` - {r_desc})")
+                    ev_str = ", ".join(list(dict.fromkeys(evidence_files))[:5])
+                    lines.append(f"\n*Based on analyzed files: {ev_str}.*")
+                    return "\n".join(lines)
+                else:
+                    return f"No analyzed component directly depends on `{target}`.\n\n*Based on analyzed files.*"
+
+        if not endpoints:
+            endpoints = [ep for c in controllers for ep in c.get("endpoints", [])]
+
+        # ----------------------------------------------------------------------
+        # Intent 7.5: Connected Repositories for Controller
+        # ----------------------------------------------------------------------
+        if ("repositor" in q and "controller" in q and ("connect" in q or "what" in q or "which" in q or "depend" in q)) and len(extracted_classes_in_query) < 2:
+            target_ctrl = extracted_classes_in_query[0] if (extracted_classes_in_query and any(c.get("name") == extracted_classes_in_query[0] for c in controllers)) else (controllers[0].get("name") if len(controllers) == 1 else None)
+            if target_ctrl:
+                ctrl_obj = next((c for c in controllers if c.get("name") == target_ctrl), None)
+                ctrl_file = ctrl_obj.get("file", f"{target_ctrl}.java") if ctrl_obj else f"{target_ctrl}.java"
+                
+                # Check downstream paths to repositories
+                connected_repos = []
+                for r in repositories:
+                    r_name = r.get("name")
+                    # Build adjacency graph
+                    adj = {}
+                    for rel in relationships:
+                        adj.setdefault(rel.get("source"), []).append(rel.get("target"))
+                        if rel.get("type") == "implements":
+                            adj.setdefault(rel.get("target"), []).append(rel.get("source"))
+                    # BFS
+                    queue = [[target_ctrl]]
+                    visited = {target_ctrl}
+                    found_path = None
+                    while queue:
+                        curr = queue.pop(0)
+                        if curr[-1] == r_name:
+                            found_path = curr
+                            break
+                        for nxt in adj.get(curr[-1], []):
+                            if nxt not in visited:
+                                visited.add(nxt)
+                                queue.append(curr + [nxt])
+                    if found_path:
+                        connected_repos.append((r_name, found_path))
+
+                if connected_repos:
+                    lines = [f"### 🗄️ Repositories connected to `{target_ctrl}`:\n"]
+                    for r_name, path in connected_repos:
+                        if len(path) == 2:
+                            lines.append(f"- `{target_ctrl}` directly depends on `{r_name}`.")
+                        else:
+                            path_str = " ➔ ".join([f"`{n}`" for n in path])
+                            lines.append(f"- `{target_ctrl}` does **not** directly depend on `{r_name}`. It connects indirectly via:\n  {path_str}")
+                    lines.append(f"\n*Based on analyzed files: {ctrl_file}.*")
+                    return "\n".join(lines)
+                else:
+                    return f"`{target_ctrl}` does not connect to any repository in the analyzed architecture.\n\n*Based on analyzed files.*"
+
+        # ----------------------------------------------------------------------
+        # Intent 8: Dependency Path & Direct vs Indirect Query
+        # ----------------------------------------------------------------------
+        if ("depend" in q or "connect" in q or "path" in q) and len(extracted_classes_in_query) >= 2:
+            src_name = extracted_classes_in_query[0]
+            tgt_name = extracted_classes_in_query[1]
+
+            # Build adjacency graph
+            adj: Dict[str, List[Tuple[str, str]]] = {}
+            for r in relationships:
+                adj.setdefault(r.get("source"), []).append((r.get("target"), r.get("type")))
+                # If relationship is implements, allow traversal from interface to implementer
+                if r.get("type") == "implements":
+                    adj.setdefault(r.get("target"), []).append((r.get("source"), "implemented by"))
+
+            # Check direct dependency
+            direct_rel = next((r for r in relationships if r.get("source") == src_name and r.get("target") == tgt_name), None)
+            
+            # BFS for shortest dependency path
+            queue = [[src_name]]
+            visited = {src_name}
+            found_path: Optional[List[str]] = None
+
+            while queue:
+                curr_path = queue.pop(0)
+                last_node = curr_path[-1]
+                if last_node == tgt_name:
+                    found_path = curr_path
+                    break
+                for nxt, _ in adj.get(last_node, []):
+                    if nxt not in visited:
+                        visited.add(nxt)
+                        queue.append(curr_path + [nxt])
+
+            src_file = next((c.get("file") for c in classes if c.get("name") == src_name), f"{src_name}.java")
+            tgt_file = next((c.get("file") for c in classes if c.get("name") == tgt_name), f"{tgt_name}.java")
+
+            if direct_rel:
+                return (
+                    f"Yes. `{src_name}` directly depends on `{tgt_name}`.\n\n"
+                    f"- Relationship type: `{direct_rel.get('type')}` ({direct_rel.get('description', '')})\n\n"
+                    f"*Based on analyzed files: {src_file}, {tgt_file}.*"
+                )
+            elif found_path:
+                path_str = " ➔ ".join([f"`{n}`" for n in found_path])
+                return (
+                    f"No. `{src_name}` does **not** directly depend on `{tgt_name}`.\n\n"
+                    f"However, there is an indirect dependency path:\n{path_str}\n\n"
+                    f"*Based on analyzed files: {src_file}, {tgt_file}.*"
+                )
+            else:
+                return (
+                    f"No. `{src_name}` does not depend on `{tgt_name}` (neither directly nor indirectly).\n\n"
+                    f"*Based on analyzed files: {src_file}, {tgt_file}.*"
+                )
+
+        # ----------------------------------------------------------------------
+        # Intent 9: Runtime / Internal Method-Body Query
+        # ----------------------------------------------------------------------
         runtime_keywords = ["what happens when", "finds no user", "if user not found", "runtime exception", "method body", "execution", "internal logic"]
         if any(kw in q for kw in runtime_keywords):
-            return "This internal runtime method-body behavior cannot be determined from the extracted static architecture metadata."
+            return "This internal runtime method-body behavior cannot be determined from the extracted static architecture metadata.\n\n*Based on analyzed files.*"
 
-        # Check architecture observations / issues query
+        # ----------------------------------------------------------------------
+        # Intent 10: Request Flow & Chain Traversal
+        # ----------------------------------------------------------------------
+        if "flow" in q or "request" in q or "call hierarchy" in q:
+            target_ctrl = extracted_classes_in_query[0] if extracted_classes_in_query else None
+            if not target_ctrl and controllers:
+                target_ctrl = controllers[0].get("name")
+
+            if target_ctrl:
+                ctrl_obj = next((c for c in controllers if c.get("name") == target_ctrl), None)
+                if ctrl_obj:
+                    lines = [f"### 🔄 Request Flow for `{target_ctrl}`:\n"]
+                    lines.append(f"1. **Controller Layer**: `{target_ctrl}` handles incoming HTTP requests (Base path: `{ctrl_obj.get('base_path', 'None')}`).")
+                    
+                    deps = ctrl_obj.get("dependencies", [])
+                    if deps:
+                        lines.append(f"2. **Service Layer**: `{target_ctrl}` delegates business logic to {', '.join([f'`{d}`' for d in deps])}.")
+                        
+                        # Find downstream services and repositories
+                        downstream_repos = set()
+                        for d in deps:
+                            s_obj = next((s for s in services if s.get("name") == d or d in s.get("implements", [])), None)
+                            if s_obj:
+                                for s_dep in s_obj.get("dependencies", []):
+                                    if any(r.get("name") == s_dep for r in repositories):
+                                        downstream_repos.add(s_dep)
+
+                        if downstream_repos:
+                            lines.append(f"3. **Persistence Layer**: Downstream service calls repositories: {', '.join([f'`{r}`' for r in downstream_repos])}.")
+                            
+                            downstream_entities = set()
+                            for r_name in downstream_repos:
+                                r_obj = next((r for r in repositories if r.get("name") == r_name), None)
+                                if r_obj and r_obj.get("managed_entity"):
+                                    downstream_entities.add(r_obj.get("managed_entity"))
+                            if downstream_entities:
+                                lines.append(f"4. **Database / Entities**: Repositories persist and query domain entities: {', '.join([f'`{e}`' for e in downstream_entities])}.")
+                    
+                    lines.append(f"\n*Based on analyzed files: {ctrl_obj.get('file')}.*")
+                    return "\n".join(lines)
+
+        # ----------------------------------------------------------------------
+        # Intent 11: Endpoints List & Service Handler Query
+        # ----------------------------------------------------------------------
+        if "endpoint" in q or "api" in q or "route" in q:
+            # Check if asking specifically which service handles an endpoint or path
+            matching_path_eps = []
+            for ep in endpoints:
+                if ep.get("path", "").lower() in q or ep.get("path", "").rstrip("/").lower() in q:
+                    matching_path_eps.append(ep)
+
+            if ("service" in q or "handler" in q) and matching_path_eps:
+                lines = [f"### 🌐 Endpoint Handling for `{matching_path_eps[0].get('path')}`:\n"]
+                for ep in matching_path_eps:
+                    ctrl_name = ep.get("controller")
+                    ctrl_obj = next((c for c in controllers if c.get("name") == ctrl_name), None)
+                    deps = ctrl_obj.get("dependencies", []) if ctrl_obj else []
+                    deps_str = ", ".join([f"`{d}`" for d in deps]) if deps else "None (direct processing)"
+                    lines.append(f"- **Endpoint**: `{ep.get('http_method')}` `{ep.get('path')}`")
+                    lines.append(f"- **Controller**: `{ctrl_name}.{ep.get('method_name')}()`")
+                    lines.append(f"- **Handling / Delegated Service(s)**: {deps_str}")
+                lines.append("\n*Based on analyzed files.*")
+                return "\n".join(lines)
+
+            target_ctrl = extracted_classes_in_query[0] if extracted_classes_in_query else None
+            filtered_eps = [ep for ep in endpoints if ep.get("controller") == target_ctrl] if target_ctrl else endpoints
+
+            lines = [f"### 🌐 REST Endpoints ({len(filtered_eps)} found):\n"]
+            for ep in filtered_eps:
+                lines.append(f"- `{ep.get('http_method')}` **{ep.get('path')}** → `{ep.get('controller')}.{ep.get('method_name')}()` : `{ep.get('return_type')}`")
+            
+            lines.append("\n*Based on analyzed files.*")
+            return "\n".join(lines)
+
+        # ----------------------------------------------------------------------
+        # Intent 12: Architecture Observations / Issues
+        # ----------------------------------------------------------------------
         if "issue" in q or "observation" in q or "anti-pattern" in q or "problem" in q or "code smell" in q:
             observations = arch.get("observations", [])
             if observations:
@@ -326,95 +761,41 @@ class GemmaArchitect:
                 for obs in observations:
                     sev_icon = "⚠️" if obs.get("severity") == "warning" else "ℹ️"
                     lines.append(f"- {sev_icon} {obs.get('message')}")
+                lines.append("\n*Based on analyzed files.*")
                 return "\n".join(lines)
             else:
-                return "No architectural anti-patterns or issues were detected in the analyzed architecture."
+                return "No architectural anti-patterns or issues were detected in the analyzed architecture.\n\n*Based on analyzed files.*"
 
-        if "flow" in q or "request" in q or "call" in q:
-            lines = ["### 🔄 Request & Architecture Flow:\n"]
-            # 1. Controller Layer
-            if controllers:
-                for ctrl in controllers:
-                    deps = ", ".join([f"`{d}`" for d in ctrl.get("dependencies", [])]) or "Service layer"
-                    lines.append(f"1. **Controller Layer**: `{ctrl.get('name')}` handles incoming HTTP requests and delegates to {deps}.")
-            else:
-                lines.append("1. **Controller Layer**: Handles incoming HTTP requests.")
+        # ----------------------------------------------------------------------
+        # Intent 13: Architecture Overview / Summary
+        # ----------------------------------------------------------------------
+        if any(kw in q for kw in ["overview", "summary", "stats", "count", "project", "structure", "classes", "types"]):
+            return (
+                f"### 📊 Architecture Overview for **{arch.get('project', 'Project')}**\n\n"
+                f"- **Total Types**: {summary.get('total_types', len(classes))} ({summary.get('classes', 0)} classes, {summary.get('interfaces', 0)} interfaces)\n"
+                f"- **Controllers**: {summary.get('controllers', 0)} ({', '.join([c.get('name') for c in controllers]) or 'None'})\n"
+                f"- **Services**: {summary.get('services', 0)} ({', '.join([s.get('name') for s in services]) or 'None'})\n"
+                f"- **Service Interfaces**: {summary.get('service_interfaces', 0)} ({', '.join([s.get('name') for s in service_interfaces]) or 'None'})\n"
+                f"- **Repositories**: {summary.get('repositories', 0)} ({', '.join([r.get('name') for r in repositories]) or 'None'})\n"
+                f"- **Entities**: {summary.get('entities', 0)} ({', '.join([e.get('name') for e in entities]) or 'None'})\n"
+                f"- **DTOs**: {summary.get('dtos', 0)} ({', '.join([d.get('name') for d in dtos]) or 'None'})\n"
+                f"- **REST Endpoints**: {summary.get('endpoints', 0)}\n"
+                f"- **Relationships**: {summary.get('relationships', 0)}\n"
+                f"- **Packages**: {summary.get('packages', len(arch.get('packages', [])))}\n\n"
+                f"*Based on analyzed files.*"
+            )
 
-            # 2. Service Interface Implementation
-            if service_interfaces:
-                for si in service_interfaces:
-                    impls = [s.get("name") for s in services if si.get("name") in s.get("implements", [])]
-                    impl_str = ", ".join([f"`{i}`" for i in impls]) if impls else f"`{si.get('name')}Impl`"
-                    lines.append(f"2. **Service Interface Implementation**: `{si.get('name')}` is implemented by {impl_str}.")
-            elif any(s.get("implements") for s in services):
-                for s in services:
-                    for imp in s.get("implements", []):
-                        lines.append(f"2. **Service Interface Implementation**: `{imp}` is implemented by `{s.get('name')}`.")
-
-            # 3. Service Layer
-            if services:
-                for srv in services:
-                    deps = ", ".join([f"`{d}`" for d in srv.get("dependencies", [])]) or "Repository layer"
-                    lines.append(f"3. **Service Layer**: `{srv.get('name')}` executes business logic and calls {deps}.")
-
-            # 4. Persistence Layer
-            if repositories:
-                for repo in repositories:
-                    managed = repo.get("managed_entity")
-                    target = f"`{managed}` entity" if managed else "the database"
-                    lines.append(f"4. **Persistence Layer**: `{repo.get('name')}` manages {target} and handles database operations.")
-
-            return "\n".join(lines)
-
-        if "endpoint" in q or "api" in q or "route" in q:
-            lines = [f"### 🌐 Detected Endpoints ({len(endpoints)} total):\n"]
-            for ep in endpoints:
-                lines.append(f"- `{ep.get('http_method')}` **{ep.get('path')}** → `{ep.get('controller')}.{ep.get('method_name')}()` : `{ep.get('return_type')}`")
-            return "\n".join(lines)
-
-        if "controller" in q:
-            lines = [f"### 🎮 Controllers ({len(controllers)} total):\n"]
-            for c in controllers:
-                deps = ", ".join(c.get("dependencies", [])) or "None"
-                eps = len(c.get("endpoints", []))
-                lines.append(f"- **{c.get('name')}** (Package: `{c.get('package')}`, BasePath: `{c.get('base_path', 'None')}`) | Dependencies: `{deps}` | Endpoints: {eps}")
-            return "\n".join(lines)
-
-        if "service" in q:
-            lines = [f"### ⚙️ Services ({len(services)} services, {len(service_interfaces)} interfaces):\n"]
-            for s in services:
-                deps = ", ".join(s.get("dependencies", [])) or "None"
-                impl = ", ".join(s.get("implements", [])) or "None"
-                lines.append(f"- **{s.get('name')}** (Package: `{s.get('package')}`) | Implements: `{impl}` | Injects: `{deps}`")
-            for si in service_interfaces:
-                lines.append(f"- **{si.get('name')}** (Interface, Package: `{si.get('package')}`)")
-            return "\n".join(lines)
-
-        if "repository" in q or "database" in q or "db" in q:
-            lines = [f"### 🗄️ Repositories ({len(repositories)} total):\n"]
-            for r in repositories:
-                lines.append(f"- **{r.get('name')}** | Extends: `{r.get('extends', 'None')}` | Manages: `{r.get('managed_entity', 'None')}`")
-            return "\n".join(lines)
-
-        if "entity" in q or "model" in q:
-            lines = [f"### 📦 Domain Entities ({len(entities)} total):\n"]
-            for e in entities:
-                fields = ", ".join([f"{f.get('name')}: {f.get('type')}{' (@Id)' if f.get('is_id') else ''}" for f in e.get("fields", [])])
-                lines.append(f"- **{e.get('name')}** (Table: `{e.get('table_name', 'default')}`) | Fields: {fields or 'None'}")
-            return "\n".join(lines)
-
-        # General summary response
+        # ----------------------------------------------------------------------
+        # Fallback: Helpful response with dynamic examples (Never dump full overview)
+        # ----------------------------------------------------------------------
+        sample_ctrl = controllers[0].get("name", "Controller") if controllers else "Controller"
+        sample_srv = services[0].get("name", "Service") if services else "Service"
+        sample_repo = repositories[0].get("name", "Repository") if repositories else "Repository"
         return (
-            f"### 📊 Architecture Overview for **{arch.get('project', 'Project')}**\n\n"
-            f"- **Total Types**: {summary.get('total_types', len(classes))} ({summary.get('classes', 0)} classes, {summary.get('interfaces', 0)} interfaces)\n"
-            f"- **Controllers**: {summary.get('controllers', 0)} ({', '.join([c.get('name') for c in controllers]) or 'None'})\n"
-            f"- **Services**: {summary.get('services', 0)} ({', '.join([s.get('name') for s in services]) or 'None'})\n"
-            f"- **Service Interfaces**: {summary.get('service_interfaces', 0)} ({', '.join([s.get('name') for s in service_interfaces]) or 'None'})\n"
-            f"- **Repositories**: {summary.get('repositories', 0)} ({', '.join([r.get('name') for r in repositories]) or 'None'})\n"
-            f"- **Entities**: {summary.get('entities', 0)} ({', '.join([e.get('name') for e in entities]) or 'None'})\n"
-            f"- **DTOs**: {summary.get('dtos', 0)} ({', '.join([d.get('name') for d in dtos]) or 'None'})\n"
-            f"- **REST Endpoints**: {summary.get('endpoints', 0)}\n"
-            f"- **Relationships**: {summary.get('relationships', 0)}\n"
-            f"- **Packages**: {summary.get('packages', len(arch.get('packages', [])))}\n\n"
-            f"*You can ask specific questions like 'Does UserController directly depend on UserRepository?', 'Explain the request flow', or 'List all endpoints'.*"
+            f"I analyzed **{arch.get('project', 'your project')}** with {summary.get('total_types', len(classes))} types across {summary.get('packages', len(arch.get('packages', [])))} packages.\n\n"
+            f"Here are 3 example questions you can ask about this project:\n"
+            f"1. `Explain the request flow for {sample_ctrl}`\n"
+            f"2. `Does {sample_ctrl} directly depend on {sample_repo}?`\n"
+            f"3. `What database entities and repositories are present?`\n\n"
+            f"*Based on analyzed files.*"
         )

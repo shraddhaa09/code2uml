@@ -5,6 +5,7 @@ let currentMermaidStructuralCode = "";
 let currentMermaidFullCode = "";
 let currentMermaidUmlCode = "";
 let showUsesEdges = false;
+let focusedController = "";
 let zoomLevel = 1.0;
 let activeTab = "diagramTab";
 
@@ -32,11 +33,25 @@ document.addEventListener("DOMContentLoaded", () => {
 // Check AI & Backend Status
 async function checkHealth() {
     const badge = document.getElementById("aiStatusBadge");
+    const deploymentBadge = document.getElementById("deploymentBadge");
+    const hostedBanner = document.getElementById("hostedWarningBanner");
+
     try {
         const res = await fetch("/api/health");
         if (res.ok) {
             const data = await res.json();
-            if (data.ai_configured) {
+            
+            // Deployment mode check
+            if (data.deployment_mode === "hosted") {
+                if (deploymentBadge) deploymentBadge.textContent = "🛡️ Static Analysis";
+                if (hostedBanner) hostedBanner.classList.remove("hidden");
+            } else {
+                if (deploymentBadge) deploymentBadge.textContent = "🛡️ Local Static Analysis";
+                if (hostedBanner) hostedBanner.classList.add("hidden");
+            }
+
+            // AI configuration check
+            if (data.ai_configured || data.ai_enabled) {
                 badge.className = "badge badge-ai";
                 badge.textContent = `🤖 Gemma Active: ${data.ai_model}`;
             } else {
@@ -45,8 +60,10 @@ async function checkHealth() {
             }
         }
     } catch (e) {
-        badge.className = "badge badge-ai offline";
-        badge.textContent = "⚡ Offline Rules Engine Active (Gemma API Key Optional)";
+        if (badge) {
+            badge.className = "badge badge-ai offline";
+            badge.textContent = "⚡ Offline Rules Engine Active (Gemma API Key Optional)";
+        }
     }
 }
 
@@ -57,20 +74,7 @@ function setupEventListeners() {
     const sampleBtn = document.getElementById("sampleBtn");
     const closeErrorBtn = document.getElementById("closeErrorBtn");
     const toggleUses = document.getElementById("toggleUsesEdges");
-    const toggleObsBtn = document.getElementById("toggleObsBtn");
-    const obsList = document.getElementById("observationsList");
-
-    if (toggleObsBtn && obsList) {
-        toggleObsBtn.addEventListener("click", () => {
-            if (obsList.style.display === "none") {
-                obsList.style.display = "flex";
-                toggleObsBtn.textContent = "Collapse";
-            } else {
-                obsList.style.display = "none";
-                toggleObsBtn.textContent = "Expand";
-            }
-        });
-    }
+    const focusSelect = document.getElementById("focusControllerSelect");
 
     browseBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -140,6 +144,14 @@ function setupEventListeners() {
         });
     }
 
+    // Focus Controller Select
+    if (focusSelect) {
+        focusSelect.addEventListener("change", (e) => {
+            focusedController = e.target.value;
+            renderActiveDiagram();
+        });
+    }
+
     // Zoom Controls
     document.getElementById("zoomInBtn").addEventListener("click", () => adjustZoom(0.15));
     document.getElementById("zoomOutBtn").addEventListener("click", () => adjustZoom(-0.15));
@@ -151,7 +163,7 @@ function setupEventListeners() {
         if (activeTab === "umlTab") {
             codeToCopy = currentMermaidUmlCode;
         } else {
-            codeToCopy = showUsesEdges ? currentMermaidFullCode : currentMermaidStructuralCode;
+            codeToCopy = getEffectiveMermaidCode();
         }
         if (codeToCopy) {
             navigator.clipboard.writeText(codeToCopy);
@@ -175,15 +187,25 @@ function setupEventListeners() {
         }
     });
 
-    // Suggestion Chips
-    document.querySelectorAll(".suggestion-chip").forEach(chip => {
-        chip.addEventListener("click", () => {
-            const prompt = chip.getAttribute("data-prompt");
-            if (prompt && currentArchitecture) {
-                askQuestion(prompt);
-            }
+    // Observations Toggle
+    const toggleObsBtn = document.getElementById("toggleObsBtn");
+    const obsList = document.getElementById("observationsList");
+    if (toggleObsBtn && obsList) {
+        toggleObsBtn.addEventListener("click", () => {
+            const isHidden = obsList.classList.toggle("hidden");
+            toggleObsBtn.textContent = isHidden ? "Expand" : "Collapse";
         });
-    });
+    }
+
+    // Diagnostics Toggle
+    const toggleDiagBtn = document.getElementById("toggleDiagBtn");
+    const diagList = document.getElementById("diagnosticsList");
+    if (toggleDiagBtn && diagList) {
+        toggleDiagBtn.addEventListener("click", () => {
+            const isHidden = diagList.classList.toggle("hidden");
+            toggleDiagBtn.textContent = isHidden ? "Details" : "Hide Details";
+        });
+    }
 }
 
 function adjustZoom(delta) {
@@ -195,6 +217,10 @@ function setZoom(lvl) {
     const container = document.getElementById("mermaidOutput");
     if (container) {
         container.style.transform = `scale(${zoomLevel})`;
+    }
+    const umlContainer = document.getElementById("mermaidUmlOutput");
+    if (umlContainer) {
+        umlContainer.style.transform = `scale(${zoomLevel})`;
     }
 }
 
@@ -289,10 +315,30 @@ async function renderAnalysis(data) {
     // 1. Build Structural vs Full Mermaid Diagram Codes
     buildMermaidDiagrams(data);
 
-    // 2. Populate All 9 Summary Cards Directly From Summary
+    // Large project automatic fallback: default to structural edges only if >40 types or >80 relationships
+    const isLargeProject = (summary.total_types > 40 || summary.relationships > 80);
+    const usesToggle = document.getElementById("toggleUsesEdges");
+    if (isLargeProject) {
+        showUsesEdges = false;
+        if (usesToggle) usesToggle.checked = false;
+    }
+
+    // Populate Focus Controller Select Dropdown
+    const focusSelect = document.getElementById("focusControllerSelect");
+    if (focusSelect) {
+        focusSelect.innerHTML = '<option value="">Full Architecture</option>';
+        (currentArchitecture.controllers || []).forEach(ctrl => {
+            const opt = document.createElement("option");
+            opt.value = ctrl.name;
+            opt.textContent = `Focus: ${ctrl.name}`;
+            focusSelect.appendChild(opt);
+        });
+        focusedController = "";
+    }
+
+    // 2. Populate All 9 Summary Cards
     document.getElementById("statTotalTypes").textContent = summary.total_types || summary.total_classes || 0;
     document.getElementById("statTypesSubtitle").textContent = `${summary.classes || 0} classes · ${summary.interfaces || 0} interfaces`;
-
     document.getElementById("statControllers").textContent = summary.controllers || 0;
 
     document.getElementById("statServices").textContent = summary.services || 0;
@@ -327,8 +373,50 @@ async function renderAnalysis(data) {
         }
     }
 
-    // Chat welcome
-    document.getElementById("chatProjectName").textContent = currentArchitecture.project || "your project";
+    // Analysis Coverage & Diagnostics Banner
+    const diagSection = document.getElementById("diagnosticsSection");
+    const diagList = document.getElementById("diagnosticsList");
+    const diagBadge = document.getElementById("diagCoverageBadge");
+    if (diagSection && currentArchitecture.diagnostics) {
+        const diag = currentArchitecture.diagnostics;
+        const cov = diag.coverage_percentage !== undefined ? diag.coverage_percentage : 100.0;
+        
+        if (diagBadge) {
+            diagBadge.textContent = cov === 100.0 ? "100% Deterministic Coverage" : `${cov}% Coverage (Partial)`;
+            if (cov < 100.0) {
+                diagBadge.classList.add("partial");
+            } else {
+                diagBadge.classList.remove("partial");
+            }
+        }
+
+        if (diagList) {
+            let diagHtml = `<div>• <b>Files Scanned:</b> ${diag.total_files_discovered || 0} Java files (${diag.parsed_ast_count || 0} via AST, ${diag.parsed_fallback_count || 0} via tokenizer fallback)</div>`;
+            if (diag.skipped_count && diag.skipped_count > 0) {
+                diagHtml += `<div>• <b>Skipped Files:</b> ${diag.skipped_count} (test / build artifacts excluded)</div>`;
+            }
+            if (diag.unsupported_languages && Object.keys(diag.unsupported_languages).length > 0) {
+                const langs = Object.entries(diag.unsupported_languages).map(([k, v]) => `${k} (${v})`).join(", ");
+                diagHtml += `<div>• <b>Unsupported JVM Sources:</b> ${langs} (currently Java-only analysis)</div>`;
+            }
+            if (diag.failed_count && diag.failed_count > 0) {
+                diagHtml += `<div style="color: var(--accent-red);">• <b>Unparsed Files:</b> ${diag.failed_count} file(s) had syntax or decoding errors</div>`;
+            }
+            if (diag.warnings && diag.warnings.length > 0) {
+                diag.warnings.forEach(w => {
+                    diagHtml += `<div style="color: var(--accent-orange);">• <b>Warning:</b> ${escapeHtml(w)}</div>`;
+                });
+            }
+            diagList.innerHTML = diagHtml;
+        }
+        diagSection.classList.remove("hidden");
+    }
+
+    // Reset Chat Thread & Welcome Bubble
+    resetChatThread();
+
+    // Dynamically Generate Suggestion Chips
+    generateDynamicChips();
 
     // Show Results Section
     document.getElementById("resultsSection").classList.remove("hidden");
@@ -350,10 +438,103 @@ async function renderAnalysis(data) {
     document.getElementById("rawJsonOutput").textContent = JSON.stringify(currentArchitecture, null, 2);
 }
 
+function resetChatThread() {
+    const chatMessages = document.getElementById("chatMessages");
+    if (!chatMessages) return;
+
+    const projName = currentArchitecture ? (currentArchitecture.project || "your project") : "your project";
+    chatMessages.innerHTML = `
+        <div class="chat-bubble bot-bubble">
+            <div class="bubble-header" id="welcomeBubbleHeader">Architecture Assistant</div>
+            <div class="bubble-content" id="welcomeBubbleContent">
+                Hello! I'm ready to explain the architecture of <b>${escapeHtml(projName)}</b>.
+                Try clicking one of the suggested prompts below or ask your own question!
+            </div>
+        </div>
+    `;
+}
+
+function generateDynamicChips() {
+    const container = document.getElementById("suggestionsContainer");
+    if (!container || !currentArchitecture) return;
+
+    container.innerHTML = "";
+    const controllers = currentArchitecture.controllers || [];
+    const repositories = currentArchitecture.repositories || [];
+    const services = currentArchitecture.services || [];
+
+    const prompts = [];
+
+    // 1. Request Flow
+    if (controllers.length > 0) {
+        prompts.push({
+            label: "🔄 Request flow",
+            prompt: `Explain the request flow for ${controllers[0].name}`
+        });
+    } else {
+        prompts.push({
+            label: "🔄 Request flow",
+            prompt: "Explain the overall request flow from controller to database."
+        });
+    }
+
+    // 2. Direct dependency check
+    if (controllers.length > 0 && repositories.length > 0) {
+        prompts.push({
+            label: `❓ ${controllers[0].name} ➔ ${repositories[0].name}?`,
+            prompt: `Does ${controllers[0].name} directly depend on ${repositories[0].name}?`
+        });
+    } else if (controllers.length > 0 && services.length > 0) {
+        prompts.push({
+            label: `❓ ${controllers[0].name} ➔ ${services[0].name}?`,
+            prompt: `Does ${controllers[0].name} directly depend on ${services[0].name}?`
+        });
+    }
+
+    // 3. Endpoints
+    if (controllers.length > 0) {
+        prompts.push({
+            label: "🌐 Endpoints",
+            prompt: `List all REST endpoints in ${controllers[0].name}`
+        });
+    } else {
+        prompts.push({
+            label: "🌐 Endpoints",
+            prompt: "List all REST endpoints, HTTP methods, and their controllers."
+        });
+    }
+
+    // 4. Database vendor
+    prompts.push({
+        label: "🏢 Database vendor",
+        prompt: "Which database vendor is used?"
+    });
+
+    // 5. Authentication
+    prompts.push({
+        label: "🔒 Auth components",
+        prompt: "Is there an authentication component?"
+    });
+
+    // 6. Entities & Repositories
+    prompts.push({
+        label: "🗄️ Entities & Repos",
+        prompt: "What database entities and repositories are present?"
+    });
+
+    prompts.forEach(p => {
+        const chip = document.createElement("span");
+        chip.className = "suggestion-chip";
+        chip.textContent = p.label;
+        chip.setAttribute("data-prompt", p.prompt);
+        chip.addEventListener("click", () => askQuestion(p.prompt));
+        container.appendChild(chip);
+    });
+}
+
 let renderCounter = 0;
 
 function cleanupStrayMermaidElements() {
-    // Mermaid 10 sometimes appends error divs or svgs with ids like #dmermaid... or error-icon to document.body
     const strayNodes = document.querySelectorAll(
         "body > svg[id^='dmermaid'], body > #dmermaid, body > svg[aria-roledescription='error'], body > .error-icon, body > svg[id^='mermaid-']"
     );
@@ -377,7 +558,10 @@ function updateRelationshipCaption(activeCode) {
     const edgeMatches = activeCode.match(/(-->|-\.->|--\|>|==>)/g) || [];
     const activeRels = edgeMatches.length;
 
-    captionEl.textContent = `Showing ${activeRels} of ${totalRels} relationships`;
+    let focusNote = focusedController ? ` (Focused on ${focusedController})` : "";
+    let usesNote = (!showUsesEdges && totalRels > activeRels) ? " · Showing structural edges only" : "";
+
+    captionEl.textContent = `Showing ${activeRels} of ${totalRels} relationships${focusNote}${usesNote}`;
 }
 
 function buildMermaidDiagrams(data) {
@@ -393,12 +577,88 @@ function buildMermaidDiagrams(data) {
     currentMermaidStructuralCode = baseMermaid;
 }
 
+function getEffectiveMermaidCode() {
+    if (!currentArchitecture) return "";
+
+    // If a specific controller is focused, build a focused subgraph
+    if (focusedController) {
+        return buildClientFocusDiagram(focusedController);
+    }
+
+    return showUsesEdges ? currentMermaidFullCode : currentMermaidStructuralCode;
+}
+
+function buildClientFocusDiagram(targetCtrlName) {
+    if (!currentArchitecture) return "";
+
+    const ctrl = (currentArchitecture.controllers || []).find(c => c.name === targetCtrlName);
+    if (!ctrl) return currentMermaidStructuralCode;
+
+    // Reachable nodes
+    const reachable = new Set([ctrl.name]);
+    const queue = [ctrl.name];
+    const adj = {};
+
+    (currentArchitecture.relationships || []).forEach(r => {
+        if (!adj[r.source]) adj[r.source] = [];
+        adj[r.source].push(r.target);
+    });
+
+    while (queue.length > 0) {
+        const curr = queue.shift();
+        const neighbors = adj[curr] || [];
+        neighbors.forEach(n => {
+            if (!reachable.has(n)) {
+                reachable.add(n);
+                queue.push(n);
+            }
+        });
+    }
+
+    // Filter structural mermaid code lines to reachable nodes & edges
+    const lines = currentMermaidStructuralCode.split("\n");
+    const outputLines = [];
+    let insideReachableSubgraph = false;
+
+    for (let line of lines) {
+        if (line.includes("subgraph ")) {
+            outputLines.push(line);
+            insideReachableSubgraph = true;
+        } else if (line.trim() === "end") {
+            outputLines.push(line);
+            insideReachableSubgraph = false;
+        } else if (line.includes("-->") || line.includes("-.->") || line.includes("==>")) {
+            // Check if source and target in edge line are reachable
+            const parts = line.split(/-->|-\.->|==>|--\|>/);
+            if (parts.length >= 2) {
+                const s = parts[0].trim().split(" ")[0];
+                const t = parts[1].trim().split(" ")[0].replace(/\|.*\|/, "").trim();
+                if (reachable.has(s) && reachable.has(t)) {
+                    outputLines.push(line);
+                }
+            }
+        } else {
+            // Node definition line
+            const m = line.match(/^\s*([A-Za-z0-9_]+)\[/);
+            if (m) {
+                if (reachable.has(m[1])) {
+                    outputLines.push(line);
+                }
+            } else {
+                outputLines.push(line);
+            }
+        }
+    }
+
+    return outputLines.join("\n");
+}
+
 async function renderActiveDiagram() {
     const mermaidContainer = document.getElementById("mermaidOutput");
     if (!mermaidContainer) return;
 
     mermaidContainer.innerHTML = "";
-    const activeCode = showUsesEdges ? currentMermaidFullCode : currentMermaidStructuralCode;
+    let activeCode = getEffectiveMermaidCode();
 
     updateRelationshipCaption(activeCode);
 
@@ -417,27 +677,50 @@ async function renderActiveDiagram() {
             try {
                 await mermaid.parse(activeCode);
             } catch (parseErr) {
-                console.warn("Mermaid parse error:", parseErr);
+                console.error("Mermaid parse error:", parseErr);
                 cleanupStrayMermaidElements();
-                mermaidContainer.innerHTML = `
-                    <div class="error-banner" style="margin: 1rem; width: 100%;">
-                        <span class="error-icon">⚠️</span>
-                        <span>Failed to parse Mermaid diagram. Copy Mermaid is still available.</span>
-                    </div>
-                `;
-                return;
+
+                // If full mode failed on a large project, automatically retry with structural mode
+                if (showUsesEdges) {
+                    console.warn("Retrying render with structural edges only...");
+                    showUsesEdges = false;
+                    const usesToggle = document.getElementById("toggleUsesEdges");
+                    if (usesToggle) usesToggle.checked = false;
+                    activeCode = getEffectiveMermaidCode();
+                    updateRelationshipCaption(activeCode);
+
+                    try {
+                        await mermaid.parse(activeCode);
+                    } catch (retryErr) {
+                        mermaidContainer.innerHTML = `
+                            <div class="error-banner" style="margin: 1rem; width: 100%;">
+                                <span class="error-icon">⚠️</span>
+                                <span>Failed to parse Mermaid diagram: ${escapeHtml(retryErr.message || String(retryErr))}. Copy Mermaid is still available.</span>
+                            </div>
+                        `;
+                        return;
+                    }
+                } else {
+                    mermaidContainer.innerHTML = `
+                        <div class="error-banner" style="margin: 1rem; width: 100%;">
+                            <span class="error-icon">⚠️</span>
+                            <span>Failed to parse Mermaid diagram: ${escapeHtml(parseErr.message || String(parseErr))}. Copy Mermaid is still available.</span>
+                        </div>
+                    `;
+                    return;
+                }
             }
         }
 
         const { svg } = await mermaid.render(renderId, activeCode);
         mermaidContainer.innerHTML = svg;
     } catch (e) {
-        console.warn("Mermaid render error:", e);
+        console.error("Mermaid render error:", e);
         cleanupStrayMermaidElements();
         mermaidContainer.innerHTML = `
             <div class="error-banner" style="margin: 1rem; width: 100%;">
                 <span class="error-icon">⚠️</span>
-                <span>Failed to render Mermaid diagram. Copy Mermaid is still available.</span>
+                <span>Failed to render Mermaid diagram: ${escapeHtml(e.message || String(e))}. Copy Mermaid is still available.</span>
             </div>
         `;
     } finally {
@@ -465,12 +748,12 @@ async function renderUmlDiagram() {
             try {
                 await mermaid.parse(currentMermaidUmlCode);
             } catch (parseErr) {
-                console.warn("Mermaid UML parse error:", parseErr);
+                console.error("Mermaid UML parse error:", parseErr);
                 cleanupStrayMermaidElements();
                 umlContainer.innerHTML = `
                     <div class="error-banner" style="margin: 1rem; width: 100%;">
                         <span class="error-icon">⚠️</span>
-                        <span>Failed to parse UML Class Diagram. Copy Mermaid is still available.</span>
+                        <span>Failed to parse UML Class Diagram: ${escapeHtml(parseErr.message || String(parseErr))}. Copy Mermaid is still available.</span>
                     </div>
                 `;
                 return;
@@ -480,12 +763,12 @@ async function renderUmlDiagram() {
         const { svg } = await mermaid.render(renderId, currentMermaidUmlCode);
         umlContainer.innerHTML = svg;
     } catch (e) {
-        console.warn("Mermaid UML render error:", e);
+        console.error("Mermaid UML render error:", e);
         cleanupStrayMermaidElements();
         umlContainer.innerHTML = `
             <div class="error-banner" style="margin: 1rem; width: 100%;">
                 <span class="error-icon">⚠️</span>
-                <span>Failed to render UML Class Diagram. Copy Mermaid is still available.</span>
+                <span>Failed to render UML Class Diagram: ${escapeHtml(e.message || String(e))}. Copy Mermaid is still available.</span>
             </div>
         `;
     } finally {
@@ -504,34 +787,38 @@ function renderEndpointsTable(endpoints) {
 
     endpoints.forEach(ep => {
         const tr = document.createElement("tr");
+        const methodClass = `method-${ep.http_method.toLowerCase()}`;
         tr.innerHTML = `
-            <td><span class="method-badge method-${escapeHtml(ep.http_method)}">${escapeHtml(ep.http_method)}</span></td>
+            <td><span class="method-badge ${methodClass}">${escapeHtml(ep.http_method)}</span></td>
             <td><code>${escapeHtml(ep.path)}</code></td>
             <td><b>${escapeHtml(ep.controller)}</b></td>
             <td><code>${escapeHtml(ep.method_name)}()</code></td>
-            <td><small>${escapeHtml(ep.return_type || "void")}</small></td>
+            <td><code>${escapeHtml(ep.return_type || "void")}</code></td>
         `;
         tbody.appendChild(tr);
     });
 }
 
-function formatAnnotation(annoName, attrs) {
+function formatAnnotation(name, attrs) {
     if (!attrs || Object.keys(attrs).length === 0) {
-        return `@${escapeHtml(annoName)}`;
+        return `@${escapeHtml(name)}`;
     }
-    const entries = Object.entries(attrs);
-    if (entries.length === 1 && entries[0][0] === "value") {
-        const val = entries[0][1];
-        const isLiteral = !(typeof val === "string" && (val.includes(".") || val === "true" || val === "false" || !isNaN(val)));
-        const formattedVal = isLiteral ? `"${escapeHtml(val)}"` : escapeHtml(val);
-        return `@${escapeHtml(annoName)}(${formattedVal})`;
-    }
-    const pairs = entries.map(([k, v]) => {
-        const isLiteral = !(typeof v === "string" && (v.includes(".") || v === "true" || v === "false" || !isNaN(v)));
-        const valStr = isLiteral ? `"${escapeHtml(v)}"` : escapeHtml(v);
-        return `${escapeHtml(k)} = ${valStr}`;
-    }).join(", ");
-    return `@${escapeHtml(annoName)}(${pairs})`;
+    const pairs = Object.entries(attrs).map(([k, v]) => {
+        let valStr;
+        if (typeof v === "string") {
+            if (v.includes(".") || v === "true" || v === "false" || (!isNaN(Number(v)) && v.trim() !== "") || v.startsWith('"')) {
+                valStr = v;
+            } else {
+                valStr = `"${v}"`;
+            }
+        } else if (typeof v === "object") {
+            valStr = JSON.stringify(v);
+        } else {
+            valStr = String(v);
+        }
+        return `${escapeHtml(k)} = ${escapeHtml(valStr)}`;
+    });
+    return `@${escapeHtml(name)}(${pairs.join(", ")})`;
 }
 
 function renderComponentCatalog(classes) {
@@ -539,7 +826,7 @@ function renderComponentCatalog(classes) {
     list.innerHTML = "";
 
     if (classes.length === 0) {
-        list.innerHTML = `<p style="color: var(--text-muted); padding: 1rem;">No components detected.</p>`;
+        list.innerHTML = `<p style="color: var(--text-muted); padding: 1rem;">No Java components detected.</p>`;
         return;
     }
 
@@ -547,11 +834,9 @@ function renderComponentCatalog(classes) {
         const card = document.createElement("div");
         card.className = "component-card";
 
-        // Role & Kind Badges
-        const roleLabel = escapeHtml(c.type || "class");
-        const kindLabel = c.is_interface ? "interface" : "class";
+        const roleLabel = c.type.toUpperCase().replace("_", " ");
+        const kindLabel = c.is_interface ? "INTERFACE" : "CLASS";
 
-        // Annotations with Attributes
         const annoBadges = (c.annotations || []).map(aname => {
             const attrs = (c.annotation_attributes || {})[aname] || {};
             const formatted = formatAnnotation(aname, attrs);
@@ -691,13 +976,19 @@ function renderComponentCatalog(classes) {
             `;
         }
 
+        // Heuristic badge if present
+        const heuristicBadge = c.detection_heuristic
+            ? `<span class="badge tag-heuristic" title="Detection heuristic: ${escapeHtml(c.detection_heuristic)}">DTO (${escapeHtml(c.detection_heuristic)})</span>`
+            : "";
+
         // Card Assembly
         card.innerHTML = `
             <div class="component-card-header">
                 <span class="component-card-title">${escapeHtml(c.name)}</span>
-                <div style="display: flex; gap: 0.35rem;">
+                <div style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
                     <span class="badge" style="background: rgba(56, 189, 248, 0.15); color: var(--accent-blue);">${roleLabel}</span>
                     <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: var(--text-muted);">${kindLabel}</span>
+                    ${heuristicBadge}
                 </div>
             </div>
             <div class="component-meta">
@@ -739,7 +1030,8 @@ async function askQuestion(question) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 question: question,
-                architecture: currentArchitecture
+                architecture: currentArchitecture,
+                analysis_id: currentArchitecture.analysis_id
             })
         });
 
@@ -761,10 +1053,10 @@ async function askQuestion(question) {
         // Header label
         const headerEl = botDiv.querySelector(".bubble-header");
         if (data.model) {
-            if (data.model.includes("deterministic") || data.model.includes("offline")) {
-                headerEl.textContent = "Deterministic rules engine (offline fallback)";
-            } else {
+            if (data.model.startsWith("Gemma")) {
                 headerEl.textContent = `Gemma Assistant (${data.model})`;
+            } else {
+                headerEl.textContent = data.model;
             }
         }
     } catch (err) {

@@ -23,7 +23,7 @@
                 </div>
             </div>
             <div class="nav-badges">
-                <span class="badge badge-privacy" title="Raw source code stays local; only extracted architectural metadata is analyzed.">
+                <span id="deploymentBadge" class="badge badge-privacy" title="Static analysis running model">
                     🛡️ Local Static Analysis
                 </span>
                 <span id="aiStatusBadge" class="badge badge-ai offline" title="Gemma AI configuration status">
@@ -31,6 +31,10 @@
                 </span>
             </div>
         </header>
+
+        <div id="hostedWarningBanner" class="hosted-warning-banner hidden">
+            ⚠️ Public demo: use the sample project, don't upload proprietary code.
+        </div>
 
         <main class="main-content">
             <!-- Upload & Action Bar -->
@@ -113,6 +117,15 @@
                     <div id="observationsList" class="observations-content"></div>
                 </div>
 
+                <!-- Analysis Coverage & Diagnostics Banner (Collapsible) -->
+                <div id="diagnosticsSection" class="diagnostics-banner hidden">
+                    <div class="diagnostics-header" id="diagnosticsHeader">
+                        <span class="diagnostics-title">📊 Analysis Coverage: <span id="diagCoverageBadge" class="badge-coverage">100% Deterministic</span></span>
+                        <button id="toggleDiagBtn" class="btn-diag-toggle" type="button">Details</button>
+                    </div>
+                    <div id="diagnosticsList" class="diagnostics-content hidden"></div>
+                </div>
+
                 <!-- Main Workspace: Diagram & Chat Split -->
                 <div class="workspace-grid">
                     <!-- Left Column: Architecture Visualizer & Tabs -->
@@ -132,6 +145,9 @@
                                     <span class="toggle-slider"></span>
                                     <span class="toggle-label">Show 'uses' edges</span>
                                 </label>
+                                <select id="focusControllerSelect" class="tool-select" title="Focus view on a specific controller's dependency chain">
+                                    <option value="">Full Architecture</option>
+                                </select>
                                 <button id="zoomInBtn" class="tool-btn" title="Zoom In">🔍+</button>
                                 <button id="zoomOutBtn" class="tool-btn" title="Zoom Out">🔍-</button>
                                 <button id="resetZoomBtn" class="tool-btn" title="Reset View">🔄 Reset</button>
@@ -208,7 +224,7 @@
                                 <span class="ai-avatar">🤖</span>
                                 <div>
                                     <h3>Architecture Assistant</h3>
-                                    <p>Answers strictly grounded in deterministic static analysis</p>
+                                    <p>Answers are based on the extracted architecture</p>
                                 </div>
                             </div>
                         </div>
@@ -217,22 +233,15 @@
                         <div id="chatMessages" class="chat-messages">
                             <div class="chat-bubble bot-bubble">
                                 <div class="bubble-header" id="welcomeBubbleHeader">Architecture Assistant</div>
-                                <div class="bubble-content">
+                                <div class="bubble-content" id="welcomeBubbleContent">
                                     Hello! I'm ready to explain the architecture of <b id="chatProjectName">your project</b>.
                                     Try clicking one of the suggested prompts below or ask your own question!
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Suggestions -->
-                        <div class="suggestions-container">
-                            <span class="suggestion-chip" data-prompt="Explain the overall request flow from controller to database.">🔄 Request flow</span>
-                            <span class="suggestion-chip" data-prompt="Does UserController directly depend on UserRepository?">❓ Does UserController depend on UserRepository?</span>
-                            <span class="suggestion-chip" data-prompt="List all REST endpoints, HTTP methods, and their controllers.">🌐 Endpoints</span>
-                            <span class="suggestion-chip" data-prompt="Which database vendor is used?">🏢 Which database vendor is used?</span>
-                            <span class="suggestion-chip" data-prompt="Is there an authentication component?">🔒 Is there an authentication component?</span>
-                            <span class="suggestion-chip" data-prompt="What database entities and repositories are present?">🗄️ Entities & Repos</span>
-                        </div>
+                        <!-- Suggestions (Dynamically generated) -->
+                        <div class="suggestions-container" id="suggestionsContainer"></div>
 
                         <!-- Chat Input Form -->
                         <form id="chatForm" class="chat-input-form">
@@ -245,7 +254,7 @@
         </main>
 
         <footer class="footer">
-            <p>Code2UML AI &bull; Autonomous Spring Boot Static Architecture & Gemma Intelligence &bull; Privacy First</p>
+            <p>Code2UML AI &bull; Autonomous Spring Boot Static Architecture & Gemma Intelligence &bull; Privacy-conscious design</p>
         </footer>
     </div>
 

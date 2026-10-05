@@ -276,3 +276,50 @@ class MermaidGenerator:
                 lines.append(f"    {src} --> {tgt} : uses")
 
         return "\n".join(lines)
+
+    @classmethod
+    def generate_focus(cls, architecture: Architecture, controller_name: str) -> str:
+        """Generates a focused diagram containing only the target controller and its reachable dependency chain."""
+        ctrl = next((c for c in architecture.classes if c.name.lower() == controller_name.lower()), None)
+        if not ctrl and architecture.controllers:
+            ctrl = architecture.controllers[0]
+        if not ctrl:
+            return cls.generate(architecture, mode="default")
+
+        reachable: Set[str] = {ctrl.name}
+        queue = [ctrl.name]
+        
+        adj: Dict[str, List[str]] = {}
+        for r in architecture.relationships:
+            adj.setdefault(r.source, []).append(r.target)
+            
+        while queue:
+            curr = queue.pop(0)
+            for neighbor in adj.get(curr, []):
+                if neighbor not in reachable:
+                    reachable.add(neighbor)
+                    queue.append(neighbor)
+                    
+        filtered_classes = [c for c in architecture.classes if c.name in reachable]
+        filtered_relationships = [r for r in architecture.relationships if r.source in reachable and r.target in reachable]
+        
+        focused_arch = Architecture(
+            analysis_id=architecture.analysis_id,
+            project=f"{architecture.project} (Focus: {ctrl.name})",
+            summary=architecture.summary,
+            diagnostics=architecture.diagnostics,
+            classes=filtered_classes,
+            controllers=[c for c in filtered_classes if c.type == "controller"],
+            services=[c for c in filtered_classes if c.type == "service"],
+            service_interfaces=[c for c in filtered_classes if c.type == "service_interface"],
+            repositories=[c for c in filtered_classes if c.type == "repository"],
+            entities=[c for c in filtered_classes if c.type == "entity"],
+            dtos=[c for c in filtered_classes if c.type == "dto"],
+            applications=[c for c in filtered_classes if c.type == "application"],
+            relationships=filtered_relationships,
+            endpoints=[ep for ep in architecture.endpoints if ep.controller == ctrl.name],
+            packages=architecture.packages,
+            observations=architecture.observations
+        )
+        return cls.generate(focused_arch, mode="default")
+

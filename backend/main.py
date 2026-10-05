@@ -38,25 +38,38 @@ SAMPLE_PROJECT_DIR = os.path.join(BASE_DIR, "sample-project")
 class ChatRequest(BaseModel):
     question: str
     architecture: Dict[str, Any]
+    analysis_id: Optional[str] = None
 
 
 def validate_and_extract_zip(zip_file_bytes: bytes, extract_to: str) -> None:
-    """Extract zip safely preventing zip-slip path traversal and zip bombs."""
+    """Extract zip safely preventing zip-slip path traversal, nested recursion, and zip bombs."""
     import io
+    MAX_UNCOMPRESSED_SIZE = 100 * 1024 * 1024  # 100MB
+    MAX_ZIP_ENTRIES = 2000
+
     try:
         with zipfile.ZipFile(io.BytesIO(zip_file_bytes)) as z:
-            namelist = z.namelist()
-            if not namelist:
+            infolist = z.infolist()
+            if not infolist:
                 raise HTTPException(status_code=400, detail="The uploaded ZIP file is empty.")
 
-            resolved_extract_to = os.path.abspath(extract_to)
-            for member in namelist:
-                # Zip-slip check
-                member_path = os.path.abspath(os.path.join(extract_to, member))
-                if not member_path.startswith(resolved_extract_to):
-                    raise HTTPException(status_code=400, detail=f"Illegal path traversal detected in ZIP: {member}")
+            if len(infolist) > MAX_ZIP_ENTRIES:
+                raise HTTPException(status_code=400, detail=f"ZIP contains {len(infolist)} entries, exceeding maximum safety limit of {MAX_ZIP_ENTRIES}.")
 
-            # Extract all files
+            total_uncompressed_size = 0
+            resolved_extract_to = os.path.abspath(extract_to)
+
+            for member in infolist:
+                total_uncompressed_size += member.file_size
+                if total_uncompressed_size > MAX_UNCOMPRESSED_SIZE:
+                    raise HTTPException(status_code=400, detail=f"Total uncompressed ZIP size exceeds safety limit of {MAX_UNCOMPRESSED_SIZE // (1024 * 1024)}MB.")
+
+                # Zip-slip check
+                member_path = os.path.abspath(os.path.join(extract_to, member.filename))
+                if not member_path.startswith(resolved_extract_to):
+                    raise HTTPException(status_code=400, detail=f"Illegal path traversal detected in ZIP: {member.filename}")
+
+            # Extract all files safely
             z.extractall(extract_to)
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Invalid or corrupted ZIP file.")
@@ -64,11 +77,14 @@ def validate_and_extract_zip(zip_file_bytes: bytes, extract_to: str) -> None:
 
 @app.get("/api/health")
 async def health_check():
+    deployment_mode = os.getenv("DEPLOYMENT_MODE", "local").lower().strip()
     return {
         "status": "healthy",
         "service": "Code2UML AI",
+        "ai_enabled": gemma_architect.is_configured(),
         "ai_configured": gemma_architect.is_configured(),
-        "ai_model": gemma_architect.model_name
+        "ai_model": gemma_architect.model_name,
+        "deployment_mode": deployment_mode
     }
 
 
@@ -98,6 +114,7 @@ async def analyze_zip(file: UploadFile = File(...)):
         mermaid_uml = MermaidGenerator.generate_uml(architecture)
 
         return {
+            "analysis_id": architecture.analysis_id,
             "architecture": architecture.model_dump(),
             "mermaid": mermaid_code,
             "mermaid_full": mermaid_full,
@@ -118,6 +135,7 @@ async def analyze_sample():
     mermaid_uml = MermaidGenerator.generate_uml(architecture)
 
     return {
+        "analysis_id": architecture.analysis_id,
         "architecture": architecture.model_dump(),
         "mermaid": mermaid_code,
         "mermaid_full": mermaid_full,
@@ -129,6 +147,10 @@ async def analyze_sample():
 async def chat_about_architecture(payload: ChatRequest):
     if not payload.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    arch_id = payload.architecture.get("analysis_id")
+    if payload.analysis_id and arch_id and payload.analysis_id != arch_id:
+        raise HTTPException(status_code=400, detail="Stale chat request: analysis_id does not match the active project architecture.")
 
     response = await gemma_architect.ask(payload.question, payload.architecture)
     return response

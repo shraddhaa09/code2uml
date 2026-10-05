@@ -40,7 +40,7 @@ async def test_gemma_fallback_without_api_key(monkeypatch):
     res_flow = await architect.ask("Explain the request flow", arch_data)
     assert "OrderController" in res_flow["answer"]
     assert "OrderService" in res_flow["answer"]
-    assert "deterministic-rules-engine" in res_flow["model"]
+    assert "deterministic" in res_flow["model"].lower()
 
     # Test question about endpoints
     res_ep = await architect.ask("List endpoints", arch_data)
@@ -122,28 +122,34 @@ async def test_gemma_direct_vs_indirect_dependency_answer():
 
 
 @pytest.mark.asyncio
-async def test_gemma_absent_components_grounded_answer():
+async def test_gemma_absent_components_grounded_answer(monkeypatch):
     """Verify that questions about non-existent components return grounded not-found answers."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GEMMA_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
     architect = GemmaArchitect()
     sample_dir = os.path.join(os.path.dirname(__file__), "..", "sample-project")
     arch = ProjectAnalyzer(sample_dir).analyze().model_dump()
 
     # Test query about authentication
     res_auth = await architect.ask("What authentication or JWT mechanisms are used?", arch)
-    assert res_auth["answer"] == "No such component was detected in the analyzed architecture."
+    assert "No authentication component detected" in res_auth["answer"] or "No such component was detected" in res_auth["answer"]
 
     # Test query about payment service
     res_pay = await architect.ask("Explain the payment gateway integration", arch)
-    assert res_pay["answer"] == "No such component was detected in the analyzed architecture."
+    assert "No such component was detected" in res_pay["answer"] or "not found" in res_pay["answer"].lower()
 
     # Test query about database vendor
     res_db = await architect.ask("Which database vendor is configured (PostgreSQL, MySQL)?", arch)
-    assert res_db["answer"] == "The extracted architecture does not provide enough information to determine the database vendor."
+    assert "not determinable" in res_db["answer"] or "not provide enough information" in res_db["answer"]
 
 
 @pytest.mark.asyncio
-async def test_gemma_observations_grounded_answer():
+async def test_gemma_observations_grounded_answer(monkeypatch):
     """Verify that questions about architectural issues answer strictly from detected observations."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GEMMA_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
     architect = GemmaArchitect()
     sample_dir = os.path.join(os.path.dirname(__file__), "..", "sample-project")
     arch = ProjectAnalyzer(sample_dir).analyze().model_dump()
@@ -155,14 +161,45 @@ async def test_gemma_observations_grounded_answer():
 
 
 @pytest.mark.asyncio
-async def test_gemma_runtime_behavior_grounded_answer():
+async def test_gemma_runtime_behavior_grounded_answer(monkeypatch):
     """Verify that runtime method-body queries are recognized as out-of-scope for static analysis."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GEMMA_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
     architect = GemmaArchitect()
     sample_dir = os.path.join(os.path.dirname(__file__), "..", "sample-project")
     arch = ProjectAnalyzer(sample_dir).analyze().model_dump()
 
     res = await architect.ask("What happens when GET /api/users/{id} finds no user in database?", arch)
     assert "cannot be determined from the extracted static architecture metadata" in res["answer"]
+
+
+@pytest.mark.asyncio
+async def test_gemma_writeup_questions(monkeypatch):
+    """Verify writeup demo queries: which service handles endpoint, connected repositories, flow."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GEMMA_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
+    architect = GemmaArchitect()
+    sample_dir = os.path.join(os.path.dirname(__file__), "..", "sample-project")
+    arch = ProjectAnalyzer(sample_dir).analyze().model_dump()
+
+    # Query 1: Which service handles this endpoint?
+    res_ep = await architect.ask("Which service handles this endpoint /api/users?", arch)
+    assert "UserController" in res_ep["answer"]
+    assert "UserService" in res_ep["answer"]
+
+    # Query 2: What repositories are connected to this controller?
+    res_repos = await architect.ask("What repositories are connected to this controller?", arch)
+    assert "UserController" in res_repos["answer"]
+    assert "UserRepository" in res_repos["answer"]
+    assert "directly depend" in res_repos["answer"] or "connect" in res_repos["answer"]
+
+    # Query 3: Flow from API to database
+    res_flow = await architect.ask("Show me the flow from this API to the database.", arch)
+    assert "Request Flow" in res_flow["answer"] or "Request & Architecture Flow" in res_flow["answer"]
+    assert "Controller Layer" in res_flow["answer"]
+    assert "Persistence Layer" in res_flow["answer"]
 
 
 def test_gemma_privacy_no_raw_source_code():
